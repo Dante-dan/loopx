@@ -93,10 +93,12 @@ def pending_operation_handoffs(
                 **plan,
                 "binding_current": current,
                 "summary": proposal["summary"],
-                "instruction": "Read the original canonical operation and consume it once before any external effect. "
+                "instruction": "The original host must authenticate through its session-bound tool transport before reading "
+                "private operation terms or consuming authority. No qualified producer is connected to the CLI; "
+                "environment thread ids are not identity proof. "
                 "Only the first successful consumption permits execution; consumed/unknown results require "
                 "original external-system reconciliation, never another submission. Inbox delivery is not execution authority.",
-                "next_action": "goal-channel consume-operation"
+                "next_action": "Integrate the original host's authenticated session-bound tool transport; do not retry via environment identity."
                 if plan["status"] == "authorized_pending"
                 else "Reconcile the original external result; do not submit again.",
             }
@@ -130,6 +132,13 @@ def agent_operation_action(
     consumption_id: str | None = None,
     outcome: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Internal locked IO seam, not a public caller-authentication endpoint.
+
+    `actor` must be supplied by a qualified host transport, never by CLI flags,
+    environment variables or an arbitrary model tool argument. Fixture calls
+    validate storage semantics only; the public CLI remains blocked until a
+    real producer/verifier pair is integrated.
+    """
     store = _store(runtime_root)
     proposal = store.load(proposal_id)
     if proposal is None:

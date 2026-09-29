@@ -41,7 +41,7 @@ export type OperationReviewFrame = OperationReviewFrameBase & (
       kind: "pending";
       attentionKind: "progress";
       interactionMode: "inform";
-      executionState?: "authorized_pending" | "consumed_outcome_pending";
+      executionState?: "host_authentication_required" | "consumed_outcome_pending";
     }
   | {
       kind: "result";
@@ -323,7 +323,7 @@ export function compileOperationReviewFrame(proposalValue: unknown): OperationRe
       attentionKind: "progress",
       interactionMode: "inform",
       ...(objectValue(parameters.executor)?.kind === "agent_session"
-        ? {executionState: objectValue(operation.agent_handoff) ? "consumed_outcome_pending" as const : "authorized_pending" as const}
+        ? {executionState: objectValue(operation.agent_handoff) ? "consumed_outcome_pending" as const : "host_authentication_required" as const}
         : {}),
     };
   }

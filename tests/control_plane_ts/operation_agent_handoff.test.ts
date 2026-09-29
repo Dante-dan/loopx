@@ -22,15 +22,19 @@ function input(): JsonObject {
 }
 const operation = (value: JsonObject) => (value.proposal as JsonObject).operation as JsonObject;
 
-test("caller selectors cannot replace missing or foreign host context", () => {
+test("public caller identity stays blocked, including exact same-user environment forgery", () => {
   const requested = input().actor as JsonObject;
-  for (const thread_id of [null, "", "another-thread"]) {
-    assert.throws(() => deriveAgentOperationActor({requested, ambient: {host_surface: "codex-app", thread_id}}));
+  for (const thread_id of [null, "", "another-thread", "original-thread"]) {
+    assert.throws(() => deriveAgentOperationActor({requested, ambient: {host_surface: "codex-app", thread_id}}),
+      {code: "operation_host_authentication_unavailable", kind: "request_rejected"});
   }
   assert.throws(() => deriveAgentOperationActor({requested,
     ambient: {host_surface: "unsupported-host", thread_id: "original-thread"}}));
-  assert.deepEqual(deriveAgentOperationActor({requested,
-    ambient: {host_surface: "codex-app", thread_id: "original-thread"}}), requested);
+  for (const claimedProof of [{verified: true}, {signature: "self-signed", issuer: "local-cli"},
+    {caller_context_source: "authenticated_host_transport"}]) {
+    assert.throws(() => deriveAgentOperationActor({requested, ambient: requested, proof: claimedProof}),
+      {code: "operation_host_authentication_unavailable"});
+  }
 });
 
 test("only the first consumed canonical confirmation grants the original session execution", () => {

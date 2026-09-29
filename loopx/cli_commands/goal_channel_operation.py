@@ -13,13 +13,11 @@ from typing import Any, ClassVar, Self
 
 from ..chat_action_store import ActionConflictError, ChatActionStore
 from ..chat_actions import ChatActionService
-from ..control_plane.collaboration.operation_handoff import agent_operation_action
 from ..control_plane.effect_runtime import (
     EffectRuntimeConflict,
     EffectRuntimeRejected,
     effect_runtime_result,
 )
-from ._host_thread import ambient_host_thread_id
 from ..extensions.lark.goal_channel import (
     default_goal_channel_target_path,
     deliver_goal_channel_operation_card,
@@ -257,10 +255,12 @@ def run_goal_channel_operation(
         return None
     try:
         if isinstance(request, _AgentOperation):
-            # These commands use the original registry/store, not Lark target
-            # settings or a new approval source. No external executor is called.
+            # No independent host identity producer is connected here. Ask the
+            # TS owner for the explicit gate before reading private parameters,
+            # outcome files or canonical operation state. Never promote an
+            # environment id, --thread-id or a local "verified" flag to identity.
             try:
-                actor = effect_runtime_result(
+                effect_runtime_result(
                     "operation.agent_handoff.actor",
                     {
                         "requested": {
@@ -269,41 +269,18 @@ def run_goal_channel_operation(
                             "host_surface": request.host_surface,
                             "thread_id": request.thread_id,
                         },
-                        "ambient": {
-                            "host_surface": request.host_surface,
-                            "thread_id": ambient_host_thread_id(request.host_surface),
-                        },
                     },
                 )
             except (EffectRuntimeConflict, EffectRuntimeRejected) as exc:
-                raise ActionConflictError(str(exc)) from exc
-            action = request.command.value.removesuffix("-operation")
-            if not request.execute:
-                action = "inspect"
-            outcome = None
-            if action == "report" and request.outcome_path is not None:
-                if request.outcome_path.stat().st_size > 65536:
-                    raise ValueError("operation outcome exceeds its bounded envelope")
-                outcome = json.loads(request.outcome_path.read_text(encoding="utf-8"))
-                if not isinstance(outcome, dict):
-                    raise ValueError("operation outcome must be an object")
-            result = agent_operation_action(
-                context.source_runtime_root,
-                context.source_registry_path,
-                proposal_id=request.proposal_id,
-                actor=actor,
-                action=action,
-                consumption_id=request.consumption_id,
-                outcome=outcome,
-            )
-            return {
-                "ok": True,
-                "goal_id": request.goal_id,
-                "execute": request.execute,
-                "operation": request.command.value.replace("-", "_"),
-                "caller_context_source": "trusted_local_host_environment",
-                **result,
-            }
+                return _operation_error_packet(
+                    request=request,
+                    blocker=exc.diagnostic_code,
+                    summary=str(exc),
+                    details={"execution_allowed": False},
+                )
+            # An unexpected success from a mismatched/older runtime still may
+            # not bypass this adapter's missing authenticated transport.
+            raise ActionConflictError("no authenticated host transport is connected")
         target_path = _operation_target_path(request, context)
         binding = (
             binding_for_goal(

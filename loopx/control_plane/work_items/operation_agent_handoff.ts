@@ -36,18 +36,16 @@ export function normalizeAgentOperationExecutor(input: JsonObject): JsonObject {
     thread_id: id(executor.thread_id, "thread_id"), revision: AGENT_OPERATION_REVISION};
 }
 
-/** CLI selectors are not caller identity. The transport supplies the existing
- * host's ambient thread in the trusted local OS-user boundary; hostile local
- * processes/file writers require a separate authenticated host transport. */
-export function deriveAgentOperationActor(input: JsonObject): JsonObject {
-  const requested = requireJsonObject(input.requested, "requested actor");
-  const ambient = requireJsonObject(input.ambient, "ambient host context");
-  requireThat(typeof ambient.thread_id === "string" && ambient.thread_id.length > 0,
-    "original host session context is unavailable; route flags are not caller identity");
-  requireThat(requested.host_surface === ambient.host_surface && requested.thread_id === ambient.thread_id,
-    "requested route is not the current host session");
-  return {goal_id: id(requested.goal_id, "goal_id"), agent_id: id(requested.agent_id, "agent_id"),
-    host_surface: id(ambient.host_surface, "host_surface"), thread_id: id(ambient.thread_id, "thread_id")};
+/** No qualified host producer is connected to the public CLI. Ambient thread
+ * ids, route flags and caller-supplied "verified" fields cannot authenticate
+ * a session. Keep the old RPC fail-closed until a real transport-owned issuer
+ * and its owner-pinned verifier are qualified together; do not mint a local
+ * bearer credential from the same untrusted environment. */
+export function deriveAgentOperationActor(_input: JsonObject): never {
+  throw new EffectRuntimeRequestError(
+    "Original-host authentication is unavailable. Integrate the original host's session-bound tool transport; environment ids and route flags are not identity proof.",
+    "operation_host_authentication_unavailable",
+  );
 }
 
 /** A registry-authorized replacement may recover evidence, never inherit the
@@ -93,7 +91,8 @@ export function planAgentOperationHandoff(input: JsonObject): JsonObject {
     payload_digest: operation.payload_digest, confirmation_digest: operation.confirmation_digest,
     claim_id: claim?.claim_id ?? null, executor_revision: executor.revision, expires_at: operation.expires_at,
     route, authorization_source: "canonical_typed_operation", execution_allowed: false,
-    host_delivery: "not_attempted", external_write_performed: false};
+    host_delivery: "not_attempted", external_write_performed: false,
+    host_authentication_required: true};
   const handoff = operation.agent_handoff == null ? null
     : requireJsonObject(operation.agent_handoff, "agent handoff");
   const observed = operation.reconciliation ?? operation.outcome;

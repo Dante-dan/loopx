@@ -125,7 +125,7 @@ test("original-Agent pending, unknown and reconciled results share truthful surf
   proposal.normalized_parameters.executor = {kind: "agent_session"};
   proposal.normalized_parameters.projection.simulated = false;
   let frame = compileOperationReviewFrame(proposal);
-  assert.equal(frame?.kind === "pending" && frame.executionState, "authorized_pending");
+  assert.equal(frame?.kind === "pending" && frame.executionState, "host_authentication_required");
   proposal.operation.agent_handoff = {consumption_id: "attempt-1"};
   frame = compileOperationReviewFrame(proposal);
   assert.equal(frame?.kind === "pending" && frame.executionState, "consumed_outcome_pending");

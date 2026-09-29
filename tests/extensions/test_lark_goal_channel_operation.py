@@ -138,7 +138,7 @@ def test_authenticated_callback_hands_off_without_calling_any_executor_and_recon
     assert first["callback_ack_is_execution_receipt"] is False
     claimed = store.load(proposal["proposal_id"])
     assert claimed["operation"]["result_delivery"] is None
-    assert "等待原 Agent" in normalized_card_text(next(iter(cards.values())))
+    assert "原宿主身份认证尚未接通" in normalized_card_text(next(iter(cards.values())))
     actor = {
         "goal_id": GOAL_ID,
         "agent_id": AGENT_ID,
@@ -157,23 +157,38 @@ def test_authenticated_callback_hands_off_without_calling_any_executor_and_recon
         execute=False,
     )
     dry = run_goal_channel_operation(args, context=context)
-    assert dry["execution_allowed"] is False and not store.load(
-        proposal["proposal_id"]
-    )["operation"].get("agent_handoff")
+    assert dry["ok"] is False and not store.load(proposal["proposal_id"])[
+        "operation"
+    ].get("agent_handoff")
     args.execute = True
     before = store.path.read_bytes()
-    for ambient_thread in ["", "thread-unrelated-fixture"]:
+    for ambient_thread in ["", "thread-unrelated-fixture", "thread-operation-fixture"]:
         monkeypatch.setenv("CODEX_THREAD_ID", ambient_thread)
         rejected = run_goal_channel_operation(args, context=context)
         assert rejected["ok"] is False
-        assert rejected["blocker"] == "operation_handoff_conflict"
+        assert rejected["blocker"] == "operation_host_authentication_unavailable"
         assert store.path.read_bytes() == before
-    monkeypatch.setenv("CODEX_THREAD_ID", "thread-operation-fixture")
-    consumed = run_goal_channel_operation(args, context=context)
+    # The internal IO fixture qualifies one-shot/reconciliation semantics,
+    # not a production host issuer. The public CLI above must remain blocked.
+    consumed = agent_operation_action(
+        runtime,
+        registry,
+        proposal_id=proposal["proposal_id"],
+        actor=actor,
+        action="consume",
+        consumption_id="attempt-1",
+    )
     assert consumed["execution_allowed"] is True
-    assert consumed["caller_context_source"] == "trusted_local_host_environment"
     assert (
-        run_goal_channel_operation(args, context=context)["execution_allowed"] is False
+        agent_operation_action(
+            runtime,
+            registry,
+            proposal_id=proposal["proposal_id"],
+            actor=actor,
+            action="consume",
+            consumption_id="attempt-1",
+        )["execution_allowed"]
+        is False
     )
     operation = claimed["operation"]
     unknown = {
@@ -191,16 +206,14 @@ def test_authenticated_callback_hands_off_without_calling_any_executor_and_recon
         "summary": "Synthetic submission result is unknown; do not resubmit.",
         "evidence_refs": ["receipt:unknown-fixture"],
     }
-    outcome_path = tmp_path / "outcome.json"
-    outcome_path.write_text(json.dumps(unknown))
-    report_args = Namespace(
-        **{
-            **vars(args),
-            "goal_channel_command": "report-operation",
-            "outcome_json": str(outcome_path),
-        }
+    reported = agent_operation_action(
+        runtime,
+        registry,
+        proposal_id=proposal["proposal_id"],
+        actor=actor,
+        action="report",
+        outcome=unknown,
     )
-    reported = run_goal_channel_operation(report_args, context=context)
     assert (
         reported["status"] == "submission_unknown" and reported["needs_reconciliation"]
     )
@@ -225,8 +238,17 @@ def test_authenticated_callback_hands_off_without_calling_any_executor_and_recon
         "reconciles_outcome_digest": _digest(unknown),
         "evidence_refs": ["receipt:reconciled-fixture"],
     }
-    outcome_path.write_text(json.dumps(final))
-    assert run_goal_channel_operation(report_args, context=context)["outcome"] == final
+    assert (
+        agent_operation_action(
+            runtime,
+            registry,
+            proposal_id=proposal["proposal_id"],
+            actor=actor,
+            action="report",
+            outcome=final,
+        )["outcome"]
+        == final
+    )
     updated = store.load(proposal["proposal_id"])
     frame = goal_channel_operation._operation_review_frame(updated)
     assert frame["resultDeliveryVerified"] is False
@@ -249,7 +271,15 @@ def test_authenticated_callback_hands_off_without_calling_any_executor_and_recon
         == "reconciled"
     )
     assert (
-        run_goal_channel_operation(args, context=context)["execution_allowed"] is False
+        agent_operation_action(
+            runtime,
+            registry,
+            proposal_id=proposal["proposal_id"],
+            actor=actor,
+            action="consume",
+            consumption_id="attempt-1",
+        )["execution_allowed"]
+        is False
     )
     assert "operation_handoffs" not in pending(runtime, GOAL_ID, AGENT_ID)
     assert (
@@ -264,71 +294,133 @@ def test_authenticated_callback_hands_off_without_calling_any_executor_and_recon
     )
 
 
-def test_real_cli_inspects_canonical_handoff_in_source_runtime(tmp_path: Path) -> None:
-    store, registry, runtime, _binding, _target = _fixture(tmp_path)
+def test_real_cli_rejects_same_user_environment_forgery_before_private_reads_or_writes(
+    tmp_path: Path,
+) -> None:
+    store, registry, runtime, binding, target = _fixture(tmp_path)
     proposal = _prepare_agent_handoff(store, registry)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "loopx.cli",
-            "--format",
-            "json",
-            "--registry",
-            str(registry),
-            "--runtime-root",
-            str(runtime),
-            "goal-channel",
-            "inspect-operation",
-            "--goal-id",
-            GOAL_ID,
-            "--agent-id",
-            AGENT_ID,
-            "--proposal-id",
-            proposal["proposal_id"],
-            "--host-surface",
-            "codex-app",
-            "--thread-id",
-            "thread-operation-fixture",
-        ],
-        text=True,
-        capture_output=True,
-        check=True,
-        timeout=30,
-        env={**os.environ, "CODEX_THREAD_ID": "thread-operation-fixture"},
+    cards: dict[str, dict[str, Any]] = {}
+    runner = _runner([], cards)
+    deliver_goal_channel_operation_card(
+        proposal_id=proposal["proposal_id"],
+        action_store_root=store.root,
+        runtime_root=runtime,
+        binding_path=binding,
+        target_path=target,
+        execute=True,
+        runner=runner,
     )
-    packet = json.loads(result.stdout)
+    delivered = store.load(proposal["proposal_id"])
+    handle_goal_channel_operation_callback(
+        _event(delivered, cards[delivered["operation"]["delivery"]["message_id"]]),
+        runtime_root=runtime,
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+        executor=lambda _: pytest.fail("no external execution"),
+    )
     assert (
-        packet["status"] == "awaiting_confirmation"
-        and packet["execution_allowed"] is False
+        store.load(proposal["proposal_id"])["operation"]["lifecycle_state"] == "claimed"
     )
     before = store.path.read_bytes()
-    wrong_thread = subprocess.run(
-        [*result.args[:-1], "thread-other"],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
-        env={**os.environ, "CODEX_THREAD_ID": "thread-operation-fixture"},
+    command_args = {
+        "consume-operation": ["--consumption-id", "attempt-forged", "--execute"],
+        "inspect-operation": [],
+        # Missing outcome is intentional: authentication must precede its read.
+        "report-operation": [
+            "--outcome-json",
+            str(tmp_path / "absent-outcome.json"),
+            "--execute",
+        ],
+    }
+    for command, extra in command_args.items():
+        for ambient_thread in [
+            "thread-operation-fixture",
+            "thread-unrelated-fixture",
+            "",
+        ]:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "loopx.cli",
+                    "--format",
+                    "json",
+                    "--registry",
+                    str(registry),
+                    "--runtime-root",
+                    str(runtime),
+                    "goal-channel",
+                    command,
+                    "--goal-id",
+                    GOAL_ID,
+                    "--agent-id",
+                    AGENT_ID,
+                    "--proposal-id",
+                    proposal["proposal_id"],
+                    "--host-surface",
+                    "codex-app",
+                    "--thread-id",
+                    "thread-operation-fixture",
+                    *extra,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+                env={**os.environ, "CODEX_THREAD_ID": ambient_thread},
+            )
+            assert result.returncode == 1, result.stdout + result.stderr
+            packet = json.loads(result.stdout)
+            assert packet["blocker"] == "operation_host_authentication_unavailable"
+            assert packet["details"]["execution_allowed"] is False
+            assert packet["external_write_performed"] is False
+            assert (
+                "environment ids and route flags are not identity proof"
+                in packet["public_summary"]
+            )
+            assert "normalized_parameters" not in packet and "outcome" not in packet
+            assert store.path.read_bytes() == before
+
+
+def test_cli_host_gate_survives_unexpected_success_from_an_older_effect_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loopx.cli_commands import goal_channel_operation as command_module
+
+    store, registry, runtime, binding, _target = _fixture(tmp_path)
+    proposal = _prepare_agent_handoff(store, registry)
+    before = store.path.read_bytes()
+    monkeypatch.setattr(
+        command_module,
+        "effect_runtime_result",
+        lambda *_: {
+            "goal_id": GOAL_ID,
+            "agent_id": AGENT_ID,
+            "host_surface": "codex-app",
+            "thread_id": "thread-operation-fixture",
+        },
     )
-    assert wrong_thread.returncode == 1
-    assert json.loads(wrong_thread.stdout)["blocker"] == "operation_handoff_conflict"
+    args = Namespace(
+        goal_channel_command="consume-operation",
+        goal_id=GOAL_ID,
+        agent_id=AGENT_ID,
+        proposal_id=proposal["proposal_id"],
+        host_surface="codex-app",
+        thread_id="thread-operation-fixture",
+        consumption_id="attempt-legacy",
+        execute=True,
+    )
+    packet = run_goal_channel_operation(
+        args,
+        context=GoalChannelOperationContext(runtime, registry, runtime, binding),
+    )
+    assert packet["ok"] is False and packet["external_write_performed"] is False
+    assert "no authenticated host transport" in packet["public_summary"]
     assert store.path.read_bytes() == before
-    for ambient_thread in ["", "thread-unrelated-fixture"]:
-        foreign_process = subprocess.run(
-            result.args,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=30,
-            env={**os.environ, "CODEX_THREAD_ID": ambient_thread},
-        )
-        assert foreign_process.returncode == 1
-        assert (
-            json.loads(foreign_process.stdout)["blocker"]
-            == "operation_handoff_conflict"
-        )
-        assert store.path.read_bytes() == before
 
 
 def _digest(value: object) -> str:
@@ -339,7 +431,7 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
-def test_real_cli_replacement_recovers_unknown_and_updates_original_card_without_consuming(
+def test_internal_replacement_io_fixture_recovers_unknown_without_qualifying_host_identity(
     tmp_path: Path,
 ) -> None:
     from loopx.thread_agent_binding import (
@@ -381,8 +473,8 @@ def test_real_cli_replacement_recovers_unknown_and_updates_original_card_without
     replacement = {**original, "thread_id": "thread-replacement-fixture"}
 
     def cli(*arguments: str, thread: str, expected_exit: int = 0) -> dict[str, Any]:
-        # This exercises the real CLI's existing ambient-context fence, not a
-        # claim of hostile-process authentication (tracked independently).
+        # Only the locator-only Inbox read remains public here. Positive
+        # operation calls below exercise internal IO, not host authentication.
         result = subprocess.run(
             [
                 sys.executable,
@@ -405,30 +497,17 @@ def test_real_cli_replacement_recovers_unknown_and_updates_original_card_without
         assert result.returncode == expected_exit, result.stdout + result.stderr
         return json.loads(result.stdout)
 
-    def operation(
-        command: str, actor: dict[str, str], *extra: str, expected_exit: int = 0
-    ):
-        return cli(
-            "goal-channel",
-            command,
-            "--goal-id",
-            GOAL_ID,
-            "--agent-id",
-            AGENT_ID,
-            "--proposal-id",
-            proposal["proposal_id"],
-            "--host-surface",
-            actor["host_surface"],
-            "--thread-id",
-            actor["thread_id"],
-            *extra,
-            thread=actor["thread_id"],
-            expected_exit=expected_exit,
+    def operation(actor: dict[str, str], action: str, **request: Any):
+        return agent_operation_action(
+            runtime,
+            registry,
+            proposal_id=proposal["proposal_id"],
+            actor=actor,
+            action=action,
+            **request,
         )
 
-    consumed = operation(
-        "consume-operation", original, "--consumption-id", "attempt-1", "--execute"
-    )
+    consumed = operation(original, "consume", consumption_id="attempt-1")
     assert consumed["execution_allowed"]
     unknown = {
         "schema_version": "loopx_operation_outcome_v0",
@@ -450,11 +529,7 @@ def test_real_cli_replacement_recovers_unknown_and_updates_original_card_without
         "summary": "Synthetic unknown submission requires original-system evidence.",
         "evidence_refs": ["receipt:unknown-fixture"],
     }
-    outcome_path = tmp_path / "outcome.json"
-    outcome_path.write_text(json.dumps(unknown))
-    operation(
-        "report-operation", original, "--outcome-json", str(outcome_path), "--execute"
-    )
+    operation(original, "report", outcome=unknown)
     unbind_thread_agent_in_registry(registry_path=registry, **original, execute=True)
     bind_thread_agent_in_registry(registry_path=registry, **replacement, execute=True)
     inbox = cli(
@@ -467,20 +542,13 @@ def test_real_cli_replacement_recovers_unknown_and_updates_original_card_without
         thread=replacement["thread_id"],
     )
     assert inbox["operation_handoffs"][0]["binding_current"] is False
-    inspected = operation("inspect-operation", replacement)
+    inspected = operation(replacement, "inspect")
     assert inspected["outcome"] == unknown and inspected["route"] == original
     assert inspected["access"]["owner"] == replacement
     assert inspected["access"]["permission"] == "historical_evidence_only"
     before = store.path.read_bytes()
-    rejected = operation(
-        "consume-operation",
-        replacement,
-        "--consumption-id",
-        "attempt-2",
-        "--execute",
-        expected_exit=1,
-    )
-    assert rejected["blocker"] == "operation_handoff_conflict"
+    with pytest.raises(ActionConflictError):
+        operation(replacement, "consume", consumption_id="attempt-2")
     assert store.path.read_bytes() == before
     final = {
         **unknown,
@@ -489,32 +557,16 @@ def test_real_cli_replacement_recovers_unknown_and_updates_original_card_without
         "summary": "Synthetic original-system evidence proves no submission.",
         "evidence_refs": ["receipt:reconciled-fixture"],
     }
-    outcome_path.write_text(json.dumps(final))
-    operation(
-        "report-operation",
-        replacement,
-        "--outcome-json",
-        str(outcome_path),
-        "--execute",
-        expected_exit=1,
-    )
+    with pytest.raises(ActionConflictError):
+        operation(replacement, "report", outcome=final)
     assert store.path.read_bytes() == before
     final["reconciles_outcome_digest"] = _digest(unknown)
-    outcome_path.write_text(json.dumps(final))
-    dry = operation(
-        "report-operation", replacement, "--outcome-json", str(outcome_path)
-    )
+    dry = operation(replacement, "inspect")
     assert not dry["execution_allowed"] and store.path.read_bytes() == before
-    reported = operation(
-        "report-operation",
-        replacement,
-        "--outcome-json",
-        str(outcome_path),
-        "--execute",
-    )
+    reported = operation(replacement, "report", outcome=final)
     assert not reported["execution_allowed"] and not reported["needs_reconciliation"]
     assert reported["reconciliation_report"]["owner"] == replacement
-    inspected = operation("inspect-operation", replacement)
+    inspected = operation(replacement, "inspect")
     assert inspected["reconciliation"] == final and inspected["outcome"] == unknown
     assert inspected["consumption"]["route"] == original
     assert inspected["reconciliation_report"]["original_route"] == original

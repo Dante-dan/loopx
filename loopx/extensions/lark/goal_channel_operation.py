@@ -363,7 +363,7 @@ def build_goal_channel_operation_result_card(
         else "green"
     )
     result_label = (
-        "已确认，等待原 Agent 执行"
+        "已确认，原宿主身份认证尚未接通"
         if pending
         else "结果未知，须核对原操作，不可重复提交"
         if unknown

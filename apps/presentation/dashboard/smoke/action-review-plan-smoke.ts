@@ -128,6 +128,10 @@ const agentPending = typedActionProposalSchema.parse({...operationProposal, stat
 const agentPendingFrame = compileActionReviewPlan(agentPending).operationFrame;
 check(agentPendingFrame?.kind === "pending" && agentPendingFrame.executionState === "consumed_outcome_pending",
   "Transport retains the original consumption; it does not imply an external result");
+const unauthenticatedFrame = compileActionReviewPlan({...agentPending,
+  operation: {...agentPending.operation, agent_handoff: null}}).operationFrame;
+check(unauthenticatedFrame?.kind === "pending" && unauthenticatedFrame.executionState === "host_authentication_required",
+  "Human confirmation alone cannot qualify original-host authentication");
 const unknownAgentResult = typedActionProposalSchema.parse({...agentPending, status: "applied",
   receipt: {projection_verified: true}, operation: {...agentPending.operation, lifecycle_state: "outcome_observed",
     outcome: {outcome: "submission_unknown", simulation: false}, result_delivery: {outcome_stage: "initial"}}});
