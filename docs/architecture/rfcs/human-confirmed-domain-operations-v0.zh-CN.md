@@ -284,12 +284,14 @@ loopx --registry REGISTRY --runtime-root RUNTIME goal-channel report-operation \
 ```
 
 `inspect-operation` 和没有 `--execute` 的命令均不消费授权。三个 CLI 命令均要求
-既有宿主导出的环境线程（例如 `CODEX_THREAD_ID`）匹配原路由；命令行标识只是选择器，
+既有宿主导出的环境线程（例如 `CODEX_THREAD_ID`）匹配调用会话的路由；命令行标识只是选择器，
 不是调用者认证。环境缺失、不匹配或不支持的宿主在读取私有参数或写回之前即拒绝。
-返回的 `caller_context_source: trusted_local_host_environment` 明确表示可信本地
-OS 用户边界，**不等于密码学 session 隔离**。能伪造环境或改写同用户规范文件的恶意
-进程不在本切片保证内；不得宣称在不可信进程间独占执行，这需要另行验收经认证的宿主
-传输。内部存储 adapter 只接收宿主已验证的 actor 事实，不接受未认证的网络请求。
+返回的 `caller_context_source: trusted_local_host_environment` 只表示环境上下文检查，
+**不等于经认证的 session 隔离**。精确头复审已复现：同用户进程可自行设置该环境，
+消费原会话授权。“原会话专属执行”仍是未解决的验收阻塞；在独立验收受信宿主传输能
+证明调用者身份之前，不得安装此路径或宣称真实最小闭环。当前 registry 绑定只授权
+路由，不认证调用者。内部存储 adapter 是本地 IO 接缝，不是未认证的网络端点；下述
+历史对账恢复并不关闭这个独立的认证缺口。
 只有首次成功的原子消费
 返回 `execution_allowed: true`。它检查经认证的确认、不可变条款、原 session 当前绑定、
 有效 Goal 与到期时间，并在任何浏览器操作之前持久记录消费。所有重试，包括响应丢失
@@ -312,6 +314,21 @@ claim、执行器 revision、consumption ID，要求 `projection_verified: true`
 仅回写证据可通过既有生命周期保护继续用于已停止/历史 Goal。现有精确 instance
 生命周期保护保持不变，不隐式迁入生命周期专用 registry 或另一个 home。
 原 Goal/Agent 注册缺失或 registry profile 不受支持均明确报错，不允许移植操作权限。
+
+原路由撤销后，**同 Goal、同 Agent、当前已注册并绑定的接手会话**可以用自己的调用
+路由执行 `inspect-operation` 与 `report-operation`。它只能检查已消费操作，回写
+原系统的历史证据，不能消费未使用的票据、改写原执行器或取得第二次执行许可。原绑定
+仍有效、接手会话未绑定、Goal/Agent 不同均拒绝恢复准入。CLI 明确返回 `access.owner`、
+`original_route`、`permission: "historical_evidence_only"` 与绑定权威，不要求接手者
+冒充旧线程。原执行路由保持不可变；从接手绑定核对到结果提交共用 registry 锁，先提交
+的撤销拒绝回写。
+
+结果证据本身保持原样。规范操作单独追加 `outcome_report` 或 `reconciliation_report`
+来源，记录实际报告者、原路由、仅历史证据权限、权威来源、consumption ID 与记录时间。
+相同结果重试保留首次已提交来源，不重标作者或授予执行。CLI 检查同时返回原未知
+outcome 与不可变对账/来源；既有 Dashboard 共享 frame 与原 Lark 卡恢复消费同一
+规范结果，不另建恢复审批存储或执行控件。这些合成 CLI/原卡读回只验收历史对账恢复，
+不代替受信宿主认证或真实群验收。
 
 未知的原始 outcome 不可修改。确定性回写追加 `operation.reconciliation`，并通过
 `reconciles_outcome_digest` 绑定原未知结果的精确摘要；只有该证据才关闭恢复义务。

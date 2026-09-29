@@ -357,16 +357,19 @@ loopx --registry REGISTRY --runtime-root RUNTIME goal-channel report-operation \
 
 `inspect-operation` and a command without `--execute` never consume authority.
 All three CLI commands require the existing host-exported ambient thread
-(for example, `CODEX_THREAD_ID`) to match the original route; CLI identifiers
+(for example, `CODEX_THREAD_ID`) to match the caller's route; CLI identifiers
 are selectors, not caller authentication. Missing, foreign or unsupported host
 context fails closed before inspecting private parameters or writing a receipt.
-The returned `caller_context_source: trusted_local_host_environment` names a
-trusted-local-OS-user fence, **not cryptographic session isolation**. A hostile
-process that can forge the environment or rewrite the same user's canonical
-files is outside this slice. Do not advertise exclusive execution across
-untrusted processes; that requires an independently qualified authenticated
-host transport. Internal storage adapters accept host-validated actor facts,
-not unauthenticated network requests.
+The returned `caller_context_source: trusted_local_host_environment` names an
+ambient-context check, **not authenticated session isolation**. Exact-head review
+reproduced a same-user process forging this environment and consuming the
+original session's authorization. Original-session-exclusive execution is an
+unresolved acceptance blocker: this path must not be installed or declared a
+live minimum loop until an independently qualified trusted-host transport
+proves caller identity. A current registry binding authorizes a route, but does
+not authenticate its caller. Internal storage adapters are local IO seams, not
+unauthenticated network endpoints; historical recovery below does not close
+this separate authentication gap.
 Only the first successful atomic consumption returns `execution_allowed: true`.
 It verifies authenticated confirmation, immutable terms, the current original
 session, active Goal and expiry, then persists consumption before any browser
@@ -397,6 +400,30 @@ guards. Existing exact-instance lifecycle guards remain in place, not an
 implicit migration into lifecycle-only registries or another home. Missing
 original Goal/Agent registration or an unsupported registry profile is an
 explicit error, not permission to transplant the operation.
+
+After the original route is withdrawn, a **currently registered and bound
+replacement session of the same Goal and Agent** may use its own caller route
+with `inspect-operation` and `report-operation`. It may inspect only an already
+consumed operation and report original-system historical evidence. It cannot
+consume an unspent ticket, change the original executor or obtain a second
+execution permission. Recovery is not admitted while the original binding is
+still current, for an unbound replacement or for a different Goal/Agent. The
+CLI returns an explicit `access.owner`, `original_route`,
+`permission: "historical_evidence_only"` and binding authority; it never asks the
+replacement to impersonate the old thread. The original executor route remains
+immutable. The same registry lock is held from recovery-binding validation
+through result commit; revocation that commits first rejects the report.
+
+Result evidence remains unchanged. The canonical operation separately appends
+`outcome_report` or `reconciliation_report` provenance with the actual reporter,
+original route, evidence-only permission, authority source, consumption ID and
+recorded time. Identical result retries preserve the first committed provenance;
+they do not relabel its author or grant execution. CLI inspection exposes both
+the original unknown outcome and its immutable reconciliation/provenance. The
+existing shared Dashboard frame and original Lark-card recovery consume the
+same canonical result; neither gets a separate recovery approval store or an
+execution control. These synthetic CLI/result-card checks are historical
+recovery acceptance, not trusted-host authentication or live-group acceptance.
 
 An unknown original outcome is immutable. A definitive report appends
 `operation.reconciliation` and binds `reconciles_outcome_digest` to the exact
