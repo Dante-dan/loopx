@@ -518,6 +518,226 @@ def test_lifecycle_only_source_profile_cannot_acquire_new_operation_authority(
     assert (store.path.read_bytes() if store.path.exists() else None) == before
 
 
+@pytest.mark.parametrize("historical", [False, True])
+def test_replacement_session_reconciles_under_its_current_binding_without_reconsumption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    historical: bool,
+) -> None:
+    from loopx.thread_agent_binding import (
+        bind_thread_agent_in_registry,
+        unbind_thread_agent_in_registry,
+    )
+
+    service, store = _service(tmp_path)
+    proposal = _claim_agent_operation(service, store)
+    runtime = store.root.parent.parent
+    args = dict(proposal_id=proposal["proposal_id"], actor=EXECUTION_ACTOR)
+    agent_operation_action(
+        runtime,
+        service.registry_path,
+        action="consume",
+        consumption_id="attempt-1",
+        **args,
+    )
+    unknown = _agent_result(proposal, "attempt-1", result="submission_unknown")
+    agent_operation_action(
+        runtime, service.registry_path, action="report", outcome=unknown, **args
+    )
+    replacement = {**EXECUTION_ACTOR, "thread_id": "thread-fixture-replacement"}
+    final = _agent_result(proposal, "attempt-1", result="not_executed")
+    final["reconciles_outcome_digest"] = _digest(unknown)
+    recovery_args = {**args, "actor": replacement}
+    before = store.path.read_bytes()
+    with pytest.raises(ActionConflictError):
+        agent_operation_action(
+            runtime, service.registry_path, action="inspect", **recovery_args
+        )
+    bind_thread_agent_in_registry(
+        registry_path=service.registry_path, **replacement, execute=True
+    )
+    with pytest.raises(ActionConflictError):
+        agent_operation_action(
+            runtime,
+            service.registry_path,
+            action="report",
+            outcome=final,
+            **recovery_args,
+        )
+    assert store.path.read_bytes() == before
+    unbind_thread_agent_in_registry(
+        registry_path=service.registry_path, **EXECUTION_ACTOR, execute=True
+    )
+    if historical:
+        registry = json.loads(service.registry_path.read_text())
+        registry["goals"][0]["activation_state"] = "stopped"
+        service.registry_path.write_text(json.dumps(registry))
+        after_expiry = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        monkeypatch.setattr("loopx.chat_action_store._utc_now", lambda: after_expiry)
+    inspected = agent_operation_action(
+        runtime, service.registry_path, action="inspect", **recovery_args
+    )
+    assert inspected["route"] == EXECUTION_ACTOR
+    assert inspected["access"]["owner"] == replacement
+    assert inspected["access"]["permission"] == "historical_evidence_only"
+    assert inspected["outcome"] == unknown and not inspected["binding_current"]
+    for attempt in ("attempt-1", "attempt-2"):
+        reason = "Goal is stopped" if historical else "original bound session"
+        with pytest.raises(ActionConflictError, match=reason):
+            agent_operation_action(
+                runtime,
+                service.registry_path,
+                action="consume",
+                consumption_id=attempt,
+                **recovery_args,
+            )
+    settled = agent_operation_action(
+        runtime, service.registry_path, action="report", outcome=final, **recovery_args
+    )
+    assert not settled["execution_allowed"] and not settled["needs_reconciliation"]
+    updated = store.load(proposal["proposal_id"])
+    assert updated["operation"]["outcome"] == unknown
+    assert updated["operation"]["reconciliation"] == final
+    provenance = updated["operation"]["reconciliation_report"]
+    assert provenance["owner"] == replacement
+    assert provenance["original_route"] == EXECUTION_ACTOR
+    assert provenance["authority_source"] == "current_registry_binding"
+    assert provenance["permission"] == "historical_evidence_only"
+    stable = store.path.read_bytes()
+    agent_operation_action(
+        runtime, service.registry_path, action="report", outcome=final, **recovery_args
+    )
+    assert store.path.read_bytes() == stable
+
+    with pytest.raises(ActionConflictError, match="already immutable"):
+        agent_operation_action(
+            runtime,
+            service.registry_path,
+            action="report",
+            outcome={
+                **final,
+                "summary": "A conflicting historical result is not a retry.",
+            },
+            **recovery_args,
+        )
+    assert store.path.read_bytes() == stable
+
+    unbind_thread_agent_in_registry(
+        registry_path=service.registry_path, **replacement, execute=True
+    )
+    with pytest.raises(ActionConflictError):
+        agent_operation_action(
+            runtime,
+            service.registry_path,
+            action="report",
+            outcome=final,
+            **recovery_args,
+        )
+    assert store.path.read_bytes() == stable
+
+
+@pytest.mark.parametrize("stage", ["initial", "reconciled"])
+def test_recovery_binding_revocation_cannot_split_report_validation_from_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    from contextlib import contextmanager
+    from threading import Event
+    from loopx.control_plane.projects import registry_codec
+    from loopx.control_plane.collaboration import operation_handoff
+    from loopx.thread_agent_binding import (
+        bind_thread_agent_in_registry,
+        unbind_thread_agent_in_registry,
+    )
+
+    service, store = _service(tmp_path)
+    proposal = _claim_agent_operation(service, store)
+    runtime = store.root.parent.parent
+    args = dict(proposal_id=proposal["proposal_id"], actor=EXECUTION_ACTOR)
+    agent_operation_action(
+        runtime,
+        service.registry_path,
+        action="consume",
+        consumption_id="attempt-1",
+        **args,
+    )
+    unknown = _agent_result(proposal, "attempt-1", result="submission_unknown")
+    if stage == "reconciled":
+        agent_operation_action(
+            runtime, service.registry_path, action="report", outcome=unknown, **args
+        )
+    replacement = {**EXECUTION_ACTOR, "thread_id": "thread-fixture-replacement"}
+    unbind_thread_agent_in_registry(
+        registry_path=service.registry_path, **EXECUTION_ACTOR, execute=True
+    )
+    bind_thread_agent_in_registry(
+        registry_path=service.registry_path, **replacement, execute=True
+    )
+    final = _agent_result(proposal, "attempt-1", result="not_executed")
+    if stage == "reconciled":
+        final["reconciles_outcome_digest"] = _digest(unknown)
+    attempted, acquired = Event(), Event()
+    original_transaction = registry_codec._registry_transaction
+    original_binding = operation_handoff._binding
+    original_write = ChatActionStore._write
+    commits = []
+
+    @contextmanager
+    def observed_transaction(*args, **kwargs):
+        attempted.set()
+        with original_transaction(*args, **kwargs) as transaction:
+            acquired.set()
+            yield transaction
+
+    def revoke():
+        result = unbind_thread_agent_in_registry(
+            registry_path=service.registry_path, **replacement, execute=True
+        )
+        assert result["written"]
+        commits.append("revocation")
+
+    def record_report(self, payload):
+        original_write(self, payload)
+        commits.append("report")
+
+    monkeypatch.setattr(registry_codec, "_registry_transaction", observed_transaction)
+    monkeypatch.setattr(ChatActionStore, "_write", record_report)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        futures = []
+
+        def interleaved_binding(registry_path, parameters):
+            current = original_binding(registry_path, parameters)
+            if parameters["executor"]["thread_id"] == replacement["thread_id"]:
+                futures.append(executor.submit(revoke))
+                assert attempted.wait(5)
+                assert not acquired.wait(0.2), (
+                    "revocation must wait for historical report commit"
+                )
+            return current
+
+        monkeypatch.setattr(operation_handoff, "_binding", interleaved_binding)
+        result = agent_operation_action(
+            runtime,
+            service.registry_path,
+            action="report",
+            outcome=final,
+            **{**args, "actor": replacement},
+        )
+        assert not result["execution_allowed"]
+        futures[0].result(timeout=5)
+    assert commits == ["report", "revocation"]
+    monkeypatch.setattr(operation_handoff, "_binding", original_binding)
+    before = store.path.read_bytes()
+    with pytest.raises(ActionConflictError):
+        agent_operation_action(
+            runtime,
+            service.registry_path,
+            action="report",
+            outcome=final,
+            **{**args, "actor": replacement},
+        )
+    assert store.path.read_bytes() == before
+
+
 def test_inbox_uses_shared_recovery_priority_and_explicit_overflow(
     tmp_path: Path,
 ) -> None:

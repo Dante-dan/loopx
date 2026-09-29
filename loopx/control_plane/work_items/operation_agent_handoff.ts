@@ -50,6 +50,21 @@ export function deriveAgentOperationActor(input: JsonObject): JsonObject {
     host_surface: id(ambient.host_surface, "host_surface"), thread_id: id(ambient.thread_id, "thread_id")};
 }
 
+/** A registry-authorized replacement may recover evidence, never inherit the
+ * immutable executor or consume an unspent authorization. Caller identity
+ * still requires a trusted host transport; a registry binding is not one. */
+function historicalAccess(input: JsonObject, route: JsonObject, consumed: boolean): JsonObject {
+  const actor = requireJsonObject(input.actor, "historical evidence actor");
+  const original = Object.entries(route).every(([key, value]) => actor[key] === value);
+  requireThat(original || (consumed && input.binding_current === false && input.actor_binding_current === true
+    && actor.goal_id === route.goal_id && actor.agent_id === route.agent_id),
+    "historical evidence actor is not the original bound session or its current recovery owner");
+  const owner = Object.fromEntries(Object.keys(route).map(key => [key, id(actor[key], `actor.${key}`)]));
+  return {mode: original ? "original_session" : "replacement_reconciliation", owner,
+    original_route: route, permission: "historical_evidence_only", execution_allowed: false,
+    authority_source: original ? "original_operation_route" : "current_registry_binding"};
+}
+
 export function planAgentOperationHandoff(input: JsonObject): JsonObject {
   const proposal = requireJsonObject(input.proposal, "proposal");
   const parameters = requireJsonObject(proposal.normalized_parameters, "parameters");
@@ -85,12 +100,8 @@ export function planAgentOperationHandoff(input: JsonObject): JsonObject {
   const unknownResult = observed != null
     && requireJsonObject(observed, "observed result").outcome === "submission_unknown";
   if (action === "project" || action === "inspect") {
-    if (action === "inspect") {
-      const actor = requireJsonObject(input.actor, "inspection actor");
-      requireThat(Object.entries(route).every(([key, value]) => actor[key] === value),
-        "inspection actor is not the original bound session");
-    }
-    return {...base, outcome_digest: digests.outcome_digest ?? null,
+    const access = action === "inspect" ? historicalAccess(input, route, !!handoff) : null;
+    return {...base, ...(access ? {access} : {}), outcome_digest: digests.outcome_digest ?? null,
       status: unknownResult ? "submission_unknown"
       : operation.lifecycle_state === "outcome_observed" ? "outcome_observed"
       : handoff ? "consumed_outcome_pending" : now >= expires ? "expired"
@@ -100,10 +111,10 @@ export function planAgentOperationHandoff(input: JsonObject): JsonObject {
   requireThat(confirmation?.decision === "confirm"
     && confirmation.confirmation_digest === operation.confirmation_digest && claim,
     "agent execution requires authenticated confirmation");
-  const actor = requireJsonObject(input.actor, "execution actor");
-  requireThat(Object.entries(route).every(([key, value]) => actor[key] === value),
-    "execution actor is not the original bound session");
   if (action === "consume") {
+    const actor = requireJsonObject(input.actor, "execution actor");
+    requireThat(Object.entries(route).every(([key, value]) => actor[key] === value),
+      "execution actor is not the original bound session");
     requireThat(input.binding_current === true, "original session binding is no longer current");
     // Even a same-id retry returns no execute permission. A lost response after
     // this commit is ambiguous, never permission to submit a second order.
@@ -118,6 +129,9 @@ export function planAgentOperationHandoff(input: JsonObject): JsonObject {
   }
   if (action === "report") {
     requireThat(handoff, "operation authorization has not been consumed");
+    const access = historicalAccess(input, route, true);
+    const report_provenance = {schema_version: "loopx_operation_report_provenance_v0", ...access,
+      operation_id: operation.operation_id, consumption_id: handoff.consumption_id, recorded_at: input.now};
     const outcome = requireJsonObject(input.outcome, "operation outcome");
     for (const key of ["operation_id", "payload_digest", "confirmation_digest", "claim_id", "executor_revision"]) {
       requireThat(outcome[key] === base[key], "operation outcome does not match the consumed authorization");
@@ -140,9 +154,10 @@ export function planAgentOperationHandoff(input: JsonObject): JsonObject {
     if (original?.outcome === "submission_unknown" && outcome.outcome !== "submission_unknown") {
       requireThat(outcome.reconciles_outcome_digest === digests.outcome_digest,
         "reconciliation must reference the exact original unknown result");
-      return {...base, status: "outcome_observed", outcome, write_reconciliation: true};
+      return {...base, access, report_provenance, status: "outcome_observed", outcome, write_reconciliation: true};
     }
-    return {...base, status: outcome.outcome === "submission_unknown" ? "submission_unknown" : "outcome_observed", outcome};
+    return {...base, access, report_provenance,
+      status: outcome.outcome === "submission_unknown" ? "submission_unknown" : "outcome_observed", outcome};
   }
   throw new EffectRuntimeRequestError("unsupported agent operation action");
 }

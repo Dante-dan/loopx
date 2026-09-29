@@ -89,6 +89,43 @@ test("unknown submission remains a reconciliation obligation after expiry with n
   assert.equal(final.write_reconciliation, true);
 });
 
+test("a currently bound replacement owns historical reconciliation, never the original consumption", () => {
+  const value = input();
+  operation(value).agent_handoff = planAgentOperationHandoff(value).write_handoff;
+  operation(value).lifecycle_state = "outcome_observed";
+  operation(value).outcome = {outcome: "submission_unknown"};
+  const replacement = {...value.actor as JsonObject, thread_id: "replacement-thread"};
+  const recovery = {...value, actor: replacement, binding_current: false, actor_binding_current: true,
+    now: "2031-01-01T00:00:00Z"};
+  const inspected = planAgentOperationHandoff({...recovery, action: "inspect"});
+  assert.deepEqual(inspected.route, value.actor);
+  assert.deepEqual((inspected.access as JsonObject).owner, replacement);
+  assert.equal((inspected.access as JsonObject).permission, "historical_evidence_only");
+  assert.equal(inspected.execution_allowed, false);
+  assert.throws(() => planAgentOperationHandoff({...recovery, action: "consume", consumption_id: "attempt-2"}));
+  const outcome: JsonObject = {schema_version: "loopx_operation_outcome_v0", operation_id: "operation-1",
+    payload_digest: "payload", confirmation_digest: "confirmation", claim_id: "claim-1",
+    executor_revision: AGENT_OPERATION_REVISION, consumption_id: "attempt-1", outcome: "not_executed",
+    projection_verified: true, simulation: false, external_write_performed: false,
+    evidence_refs: ["receipt:original-system-reconciliation"], reconciles_outcome_digest: "unknown-result-digest"};
+  const report = planAgentOperationHandoff({...recovery, action: "report", outcome});
+  assert.equal(report.execution_allowed, false);
+  assert.equal(report.write_reconciliation, true);
+  assert.deepEqual((report.report_provenance as JsonObject).owner, replacement);
+  assert.deepEqual((report.report_provenance as JsonObject).original_route, value.actor);
+  for (const rejected of [
+    {...recovery, actor_binding_current: false},
+    {...recovery, binding_current: true},
+    {...recovery, actor: {...replacement, agent_id: "other-agent"}},
+    {...recovery, actor: {...replacement, goal_id: "other-goal"}},
+  ]) {
+    assert.throws(() => planAgentOperationHandoff({...rejected, action: "inspect"}));
+    assert.throws(() => planAgentOperationHandoff({...rejected, action: "report", outcome}));
+  }
+  operation(value).agent_handoff = null;
+  assert.throws(() => planAgentOperationHandoff({...recovery, action: "inspect"}));
+});
+
 test("bounded inbox retains recovery first and declares overflow instead of silently discarding it", () => {
   const items = Array.from({length: 22}, (_, index) => ({operation_id: `operation-${String(index).padStart(2, "0")}`,
     needs_reconciliation: index === 21, execution_allowed: false}));

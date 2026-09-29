@@ -146,7 +146,9 @@ def agent_operation_action(
         agents=(actor["agent_id"],),
         caller_goal_ref=parameters.get("origin_goal_ref"),
         require_active=action == "consume",
-        lock_registry=action == "consume",
+        # Recovery-owner binding must stay valid through evidence commit too.
+        # Use the same Goal -> registry -> action-store ordering as consumption.
+        lock_registry=True,
     ) as scope:
         if action == "consume":
             decide_collaboration_lifecycle(scope, operation="request_create")
@@ -162,9 +164,18 @@ def agent_operation_action(
                 route=ref,
             )
         current = _binding(registry_path, parameters)
+        actor_current = (
+            _binding(registry_path, {**parameters, "executor": actor})
+            if action in {"inspect", "report"}
+            else False
+        )
         if action == "inspect":
             plan = store._agent_operation_plan(
-                proposal, action="inspect", actor=dict(actor)
+                proposal,
+                action="inspect",
+                actor=dict(actor),
+                binding_current=current,
+                actor_binding_current=actor_current,
             )
             return {
                 **plan,
@@ -174,6 +185,10 @@ def agent_operation_action(
                 "consumption": proposal["operation"].get("agent_handoff"),
                 "outcome": proposal["operation"].get("outcome"),
                 "reconciliation": proposal["operation"].get("reconciliation"),
+                "outcome_report": proposal["operation"].get("outcome_report"),
+                "reconciliation_report": proposal["operation"].get(
+                    "reconciliation_report"
+                ),
             }
         if action == "consume":
             return store.consume_agent_operation(
@@ -188,6 +203,7 @@ def agent_operation_action(
                 outcome=outcome or {},
                 agent_actor=actor,
                 agent_binding_current=current,
+                agent_actor_binding_current=actor_current,
             )
             plan = store._agent_operation_plan(updated, action="project")
             return {
@@ -195,5 +211,9 @@ def agent_operation_action(
                 **plan,
                 "outcome": updated["operation"].get("reconciliation")
                 or updated["operation"]["outcome"],
+                "outcome_report": updated["operation"].get("outcome_report"),
+                "reconciliation_report": updated["operation"].get(
+                    "reconciliation_report"
+                ),
             }
         raise ValueError("unsupported agent operation action")

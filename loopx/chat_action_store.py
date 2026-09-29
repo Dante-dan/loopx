@@ -954,6 +954,7 @@ class ChatActionStore:
         outcome: Mapping[str, Any],
         agent_actor: Mapping[str, Any] | None = None,
         agent_binding_current: bool = False,
+        agent_actor_binding_current: bool = False,
     ) -> dict[str, Any]:
         """Persist the domain result without making it a retryable submission."""
 
@@ -979,14 +980,17 @@ class ChatActionStore:
             if not isinstance(operation, dict):
                 raise KeyError("typed operation was not found")
             parameters = proposal.get("normalized_parameters") or {}
+            report_provenance = None
             if (parameters.get("executor") or {}).get("kind") == "agent_session":
                 plan = self._agent_operation_plan(
                     proposal,
                     action="report",
                     actor=agent_actor,
                     binding_current=agent_binding_current,
+                    actor_binding_current=agent_actor_binding_current,
                     outcome=safe_outcome,
                 )
+                report_provenance = plan["report_provenance"]
                 if plan.get("write_reconciliation") is True:
                     existing = operation.get("reconciliation")
                     if existing is not None:
@@ -996,6 +1000,7 @@ class ChatActionStore:
                             )
                         return proposal
                     operation["reconciliation"] = safe_outcome
+                    operation["reconciliation_report"] = report_provenance
                     proposal["receipt"] = safe_outcome
                     proposal["updated_at"] = _utc_now()
                     self._write(payload)
@@ -1014,6 +1019,8 @@ class ChatActionStore:
             now = _utc_now()
             operation["lifecycle_state"] = "outcome_observed"
             operation["outcome"] = safe_outcome
+            if report_provenance is not None:
+                operation["outcome_report"] = report_provenance
             proposal["status"] = "applied"
             proposal["receipt"] = safe_outcome
             proposal["applied_at"] = now

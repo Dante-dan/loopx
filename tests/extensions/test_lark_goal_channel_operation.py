@@ -339,6 +339,207 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
+def test_real_cli_replacement_recovers_unknown_and_updates_original_card_without_consuming(
+    tmp_path: Path,
+) -> None:
+    from loopx.thread_agent_binding import (
+        bind_thread_agent_in_registry,
+        unbind_thread_agent_in_registry,
+    )
+
+    store, registry, runtime, binding, target = _fixture(tmp_path)
+    proposal = _prepare_agent_handoff(store, registry)
+    cards: dict[str, dict[str, Any]] = {}
+    runner = _runner([], cards)
+    deliver_goal_channel_operation_card(
+        proposal_id=proposal["proposal_id"],
+        action_store_root=store.root,
+        runtime_root=runtime,
+        binding_path=binding,
+        target_path=target,
+        execute=True,
+        runner=runner,
+    )
+    delivered = store.load(proposal["proposal_id"])
+    message_id = delivered["operation"]["delivery"]["message_id"]
+    handle_goal_channel_operation_callback(
+        _event(delivered, cards[message_id]),
+        runtime_root=runtime,
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+        executor=lambda _: pytest.fail("recovery fixture must not execute externally"),
+    )
+    original = {
+        "goal_id": GOAL_ID,
+        "agent_id": AGENT_ID,
+        "host_surface": "codex-app",
+        "thread_id": "thread-operation-fixture",
+    }
+    replacement = {**original, "thread_id": "thread-replacement-fixture"}
+
+    def cli(*arguments: str, thread: str, expected_exit: int = 0) -> dict[str, Any]:
+        # This exercises the real CLI's existing ambient-context fence, not a
+        # claim of hostile-process authentication (tracked independently).
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "loopx.cli",
+                "--format",
+                "json",
+                "--registry",
+                str(registry),
+                "--runtime-root",
+                str(runtime),
+                *arguments,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+            env={**os.environ, "CODEX_THREAD_ID": thread},
+        )
+        assert result.returncode == expected_exit, result.stdout + result.stderr
+        return json.loads(result.stdout)
+
+    def operation(
+        command: str, actor: dict[str, str], *extra: str, expected_exit: int = 0
+    ):
+        return cli(
+            "goal-channel",
+            command,
+            "--goal-id",
+            GOAL_ID,
+            "--agent-id",
+            AGENT_ID,
+            "--proposal-id",
+            proposal["proposal_id"],
+            "--host-surface",
+            actor["host_surface"],
+            "--thread-id",
+            actor["thread_id"],
+            *extra,
+            thread=actor["thread_id"],
+            expected_exit=expected_exit,
+        )
+
+    consumed = operation(
+        "consume-operation", original, "--consumption-id", "attempt-1", "--execute"
+    )
+    assert consumed["execution_allowed"]
+    unknown = {
+        "schema_version": "loopx_operation_outcome_v0",
+        **{
+            key: consumed[key]
+            for key in (
+                "operation_id",
+                "payload_digest",
+                "confirmation_digest",
+                "claim_id",
+                "executor_revision",
+            )
+        },
+        "consumption_id": "attempt-1",
+        "projection_verified": True,
+        "simulation": False,
+        "outcome": "submission_unknown",
+        "external_write_performed": True,
+        "summary": "Synthetic unknown submission requires original-system evidence.",
+        "evidence_refs": ["receipt:unknown-fixture"],
+    }
+    outcome_path = tmp_path / "outcome.json"
+    outcome_path.write_text(json.dumps(unknown))
+    operation(
+        "report-operation", original, "--outcome-json", str(outcome_path), "--execute"
+    )
+    unbind_thread_agent_in_registry(registry_path=registry, **original, execute=True)
+    bind_thread_agent_in_registry(registry_path=registry, **replacement, execute=True)
+    inbox = cli(
+        "manager-inbox",
+        "read",
+        "--goal-id",
+        GOAL_ID,
+        "--agent-id",
+        AGENT_ID,
+        thread=replacement["thread_id"],
+    )
+    assert inbox["operation_handoffs"][0]["binding_current"] is False
+    inspected = operation("inspect-operation", replacement)
+    assert inspected["outcome"] == unknown and inspected["route"] == original
+    assert inspected["access"]["owner"] == replacement
+    assert inspected["access"]["permission"] == "historical_evidence_only"
+    before = store.path.read_bytes()
+    rejected = operation(
+        "consume-operation",
+        replacement,
+        "--consumption-id",
+        "attempt-2",
+        "--execute",
+        expected_exit=1,
+    )
+    assert rejected["blocker"] == "operation_handoff_conflict"
+    assert store.path.read_bytes() == before
+    final = {
+        **unknown,
+        "outcome": "not_executed",
+        "external_write_performed": False,
+        "summary": "Synthetic original-system evidence proves no submission.",
+        "evidence_refs": ["receipt:reconciled-fixture"],
+    }
+    outcome_path.write_text(json.dumps(final))
+    operation(
+        "report-operation",
+        replacement,
+        "--outcome-json",
+        str(outcome_path),
+        "--execute",
+        expected_exit=1,
+    )
+    assert store.path.read_bytes() == before
+    final["reconciles_outcome_digest"] = _digest(unknown)
+    outcome_path.write_text(json.dumps(final))
+    dry = operation(
+        "report-operation", replacement, "--outcome-json", str(outcome_path)
+    )
+    assert not dry["execution_allowed"] and store.path.read_bytes() == before
+    reported = operation(
+        "report-operation",
+        replacement,
+        "--outcome-json",
+        str(outcome_path),
+        "--execute",
+    )
+    assert not reported["execution_allowed"] and not reported["needs_reconciliation"]
+    assert reported["reconciliation_report"]["owner"] == replacement
+    inspected = operation("inspect-operation", replacement)
+    assert inspected["reconciliation"] == final and inspected["outcome"] == unknown
+    assert inspected["consumption"]["route"] == original
+    assert inspected["reconciliation_report"]["original_route"] == original
+    frame = goal_channel_operation._operation_review_frame(
+        store.load(proposal["proposal_id"])
+    )
+    assert frame["resultKind"] == "not_executed" and not frame["resultDeliveryVerified"]
+    recovered = recover_goal_channel_operation_results(
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        allowed_chat_ids={CHAT_ID},
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+    )
+    assert recovered["delivered"] == 1 and set(cards) == {message_id}
+    assert "已结束，未执行" in normalized_card_text(cards[message_id])
+    updated = store.load(proposal["proposal_id"])
+    assert updated["operation"]["outcome"] == unknown
+    assert updated["operation"]["result_delivery"]["outcome_stage"] == "reconciled"
+    assert goal_channel_operation._operation_review_frame(updated)[
+        "resultDeliveryVerified"
+    ]
+
+
 def _fixture(
     tmp_path: Path,
 ) -> tuple[ChatActionStore, Path, Path, Path, Path]:
