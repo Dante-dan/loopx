@@ -5,7 +5,7 @@
 - **交付成熟度：** 提案
 - **作者 / 负责人：** LoopX 维护者与可选垂域 provider 维护者
 - **创建日期：** 2026-09-12
-- **最近规范修订：** 2026-09-12
+- **最近规范修订：** 2026-09-30
 - **实现基线：** `72e557586`
 - **相关契约：** [扩展](../../reference/extensions.md)、
   [Effect interpreter](agent-loop-effect-interpreter-v0.md)
@@ -15,6 +15,7 @@
 
 第 1–11 节定义拟议契约，并非已发布的命令。第 12 节记录尚未解决的实现选择。
 本文不修改运行时、默认权限、配置或用户入口。
+第 13 节记录原 Agent 续接的实现切片；部署与真实验收独立于本地验证。
 
 ## 1. 决策摘要
 
@@ -232,3 +233,81 @@ M1 同时涵盖 UI 与后端，不要拆成“后端 PR 已完成”而遗忘前
    不把签名加入现有行情采集器。由 adapter 维护者在 M2 决定。
 4. **部署资格：** 核实真实飞书应用回调和 Web owner 身份认证机制。
    事件进程健康本身不能证明任一用户路径可用。M1 验收前必须完成。
+
+## 13. 原 Agent 续接切片
+
+已有用户授权的 Agent 若已掌握垂域浏览器或 adapter 工作流，不必仅为将精确确认
+回传给它而新增 API 凭据路径。这是另一种执行接缝，不放松上文的金融提交前检查、
+账户级约束或原始证据要求。Core 不解释价格、不选平台、不恢复浏览器、不签名、不下单。
+
+### 权威与用户入口
+
+- `chat/actions/actions.json` 中原始 `operation.execute` 提案仍是确认、claim、
+  消费及结果的唯一存储。
+- 显式执行器形状为 `{kind: "agent_session", host_surface, thread_id,
+  revision: "agent-session-handoff-v0"}`。准备时核对原 registry 中精确的
+  Goal/已注册 Agent/session 绑定，拒绝以模拟冒充真实执行。生命周期专用的
+  `source_session_v1` registry 目前拒绝业务操作准备；本切片不绕过该 owner，也不为
+  替换的 instance 开启业务权限。
+- `operation_agent_handoff.ts` 管理准入、一次消费、对账绑定及有界 Inbox 注意力。
+  Python 提供锁定的规范存储、原 registry 事实及现有生命周期保护，不另建决策源。
+- 复用现有 Lark prepare/deliver 与经认证的回调。确认成功后原提案保持 claimed，
+  没有外部结果。回调重放、模拟器、卡片投递恢复均不得调用该 Agent 的浏览器或 adapter。
+- 原 manager Inbox 直接从规范操作投影定位信息，不复制审批记录。Turn-start hook
+  将它计入 `agent_read_required`。已消费/未知结果义务先于未消费票据展示；每页 20 条
+  之外明确给出总数量、类型化 overflow 原因及下一条操作 ID，不静默丢弃工作；可按该
+  ID 直接检查原操作。
+- Dashboard 详情与原 Lark 卡使用同一操作 frame：已确认待原 Agent、已消费待真实
+  证据、未知须对账不得重提，以及独立核验的结果。Dashboard 对用户操作确认保持只读。
+  不新增配置权威：执行器由原请求选择，原渠道/绑定 owner 仍是权威。
+
+### 原运行时 CLI
+
+使用原 registry 和 runtime，不复制 session，也不借用另一个 home 的记录。
+以下本地续接命令不要求 Lark 已安装或可达；新卡片的准备/投递仍须通过原扩展与
+经认证入口的检查。
+
+```sh
+loopx --registry REGISTRY --runtime-root RUNTIME goal-channel inspect-operation \
+  --goal-id GOAL --agent-id AGENT --proposal-id OPERATION \
+  --host-surface HOST --thread-id ORIGINAL_THREAD
+loopx --registry REGISTRY --runtime-root RUNTIME goal-channel consume-operation \
+  --goal-id GOAL --agent-id AGENT --proposal-id OPERATION \
+  --host-surface HOST --thread-id ORIGINAL_THREAD \
+  --consumption-id STABLE_ATTEMPT --execute
+loopx --registry REGISTRY --runtime-root RUNTIME goal-channel report-operation \
+  --goal-id GOAL --agent-id AGENT --proposal-id OPERATION \
+  --host-surface HOST --thread-id ORIGINAL_THREAD --outcome-json OUTCOME --execute
+```
+
+`inspect-operation` 和没有 `--execute` 的命令均不消费授权。只有首次成功的原子消费
+返回 `execution_allowed: true`。它检查经认证的确认、不可变条款、原 session 当前绑定、
+有效 Goal 与到期时间，并在任何浏览器操作之前持久记录消费。所有重试，包括响应丢失
+或重启后使用同一 attempt，均不再获得执行许可。这不承诺平台恰好执行一次；存在歧义
+必须按原平台证据对账。
+
+原 Agent 回写 `loopx_operation_outcome_v0`，绑定精确 operation、载荷与确认摘要、
+claim、执行器 revision、consumption ID，要求 `projection_verified: true`、
+`simulation: false`、有界原始证据引用，并单独声明 `external_write_performed`。
+结果为 `executed`、`not_executed` 或 `submission_unknown`。未知保守声明可能存在外部
+副作用；传输成功不能证明交易或保护单。引用应为安全的不透明回执标识，不能含凭据或
+私有绝对路径；垂域证据及私有交易日记保留详细材料。
+
+### 恢复、投递与剩余验收
+
+已消费或未知操作在到期或 session 重绑后仍是恢复义务；这些变化不能授予新执行。
+仅回写证据可通过既有生命周期保护继续用于已停止/历史 Goal。现有精确 instance
+生命周期保护保持不变，不隐式迁入生命周期专用 registry 或另一个 home。
+原 Goal/Agent 注册缺失或 registry profile 不受支持均明确报错，不允许移植操作权限。
+
+未知的原始 outcome 不可修改。确定性回写追加 `operation.reconciliation`，并通过
+`reconciles_outcome_digest` 绑定原未知结果的精确摘要；只有该证据才关闭恢复义务。
+现有投递恢复更新原结果卡，旧未知结果的投递不能证明新的对账结果；读回必须匹配当前
+`initial` 或 `reconciled` 阶段。上述路径均不会重新提交。
+
+本切片**没有实现主机即时唤醒**。Inbox 可见性如实返回
+`host_delivery: "not_attempted"`；既有 Turn/heartbeat 读取不等于主机投递回执。
+后续主机唤醒应复用原宿主传输，给出真实尝试/读回证据，不启动平行的 resumed session。
+本地合成回调、CLI、并发、到期、对账及打包 UI 检查只证明协议行为。宣称真实最小闭环
+之前，仍须安装、真实群确认、原 Agent 消费回执、真实平台/保护证据及原卡片读回。
+不得向真实群发送合成工程卡来冒充验收。

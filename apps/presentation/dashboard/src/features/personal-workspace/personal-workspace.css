@@ -756,6 +756,8 @@ button.personal-execution-chip:focus-visible { outline: 2px solid #0070f3; outli
 .personal-proposal-row strong { font-size: 13px; }
 .personal-proposal-row p { margin: 0; color: #686f7c; font-size: 11px; }
 .personal-proposal-row > b { color: #315fc8; font-size: 11px; }
+.personal-proposal-row[data-action-kind="operation.execute"] { grid-template-columns: 36px minmax(0, 1fr); }
+.personal-proposal-row[data-action-kind="operation.execute"] > b { grid-column: 2; overflow-wrap: anywhere; }
 .personal-proposal-row.is-applied { border-color: #b5ddcc; background: #f3fbf7; }
 .personal-proposal-row.is-error, .personal-proposal-row.is-stale { border-color: #efc3c3; background: #fff7f7; }
 .personal-proposal-row.is-gated { border-color: #ead39c; background: #fffaf0; }

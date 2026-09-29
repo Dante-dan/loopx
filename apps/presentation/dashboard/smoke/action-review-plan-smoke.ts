@@ -121,3 +121,20 @@ check(operationPlan.interaction === "gated", "Operation execution keeps its auth
 check(operationPlan.operationFrame?.kind === "confirmation", "Dashboard consumes the shared confirmation frame");
 check(operationPlan.operationFrame?.interactionMode === "confirm_reject", "The shared frame preserves confirm/reject interaction");
 check(operationPlan.operationFrame?.content.fields[0]?.value === "Limit · GTC", "The shared frame preserves bounded projection fields");
+
+const agentPending = typedActionProposalSchema.parse({...operationProposal, status: "applying",
+  normalized_parameters: {...operationProposal.normalized_parameters, executor: {kind: "agent_session"}},
+  operation: {...operationProposal.operation, lifecycle_state: "claimed", agent_handoff: {consumption_id: "attempt-1"}}});
+const agentPendingFrame = compileActionReviewPlan(agentPending).operationFrame;
+check(agentPendingFrame?.kind === "pending" && agentPendingFrame.executionState === "consumed_outcome_pending",
+  "Transport retains the original consumption; it does not imply an external result");
+const unknownAgentResult = typedActionProposalSchema.parse({...agentPending, status: "applied",
+  receipt: {projection_verified: true}, operation: {...agentPending.operation, lifecycle_state: "outcome_observed",
+    outcome: {outcome: "submission_unknown", simulation: false}, result_delivery: {outcome_stage: "initial"}}});
+check(compileActionReviewPlan(unknownAgentResult).interaction === "repair", "Delivered unknown submission is not completion");
+const reconciledAgentResult = typedActionProposalSchema.parse({...unknownAgentResult,
+  operation: {...unknownAgentResult.operation, reconciliation: {outcome: "not_executed", simulation: false}}});
+check(compileActionReviewPlan(reconciledAgentResult).interaction === "repair", "Old card delivery cannot certify a new reconciliation");
+check(compileActionReviewPlan({...reconciledAgentResult, operation: {...reconciledAgentResult.operation,
+  result_delivery: {outcome_stage: "reconciled"}}}).interaction === "completed", "Only reconciled card readback completes presentation");
+console.log("PASS: original-Agent handoff and append-only reconciliation survive the frontend transport");

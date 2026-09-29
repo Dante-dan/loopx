@@ -5,7 +5,7 @@
 - **Delivery maturity:** Proposal
 - **Authors / owners:** LoopX maintainers and optional domain-provider maintainers
 - **Created:** 2026-09-12
-- **Last normative revision:** 2026-09-12
+- **Last normative revision:** 2026-09-30
 - **Implementation baseline:** `72e557586`
 - **Related contracts:** [Extensions](../../reference/extensions.md),
   [Effect interpreter](agent-loop-effect-interpreter-v0.md)
@@ -17,6 +17,8 @@ the contract; a difference in their requirements or boundaries is a defect.
 Sections 1–11 define the proposed contract, not shipped commands. Section 12
 records unresolved implementation choices. This document changes no runtime,
 default permission, configuration or user entry point.
+Section 13 describes the original-Agent continuation implementation slice;
+its deployment and live acceptance remain separate from local validation.
 
 ## 1. Decision summary
 
@@ -289,3 +291,106 @@ extract the actual shared seam, not a speculative adapter framework.
 4. **Deployment qualification:** verify the actual Lark app callback and
    authenticated web-owner mechanism. A healthy event process alone is not
    evidence that either user path works. Required before M1 acceptance.
+
+## 13. Original-Agent continuation slice
+
+For an existing, user-authorized Agent that already owns a domain's browser or
+adapter workflow, do not require a new API credential path just to return an
+exact human confirmation to that Agent. This is an alternative execution seam,
+not a relaxation of the financial preflight, account-wide constraints or
+original-source evidence requirements above. Core does not interpret a price,
+choose a venue, resume a browser, sign or submit an order.
+
+### Owners and entry points
+
+- The original `operation.execute` proposal in `chat/actions/actions.json`
+  remains the only confirmation, claim, consumption and outcome store.
+- The explicit executor shape is `{kind: "agent_session", host_surface,
+  thread_id, revision: "agent-session-handoff-v0"}`. Preparation checks the
+  original registry's exact Goal/registered-Agent/session binding and rejects
+  simulation masquerading as real execution. The lifecycle-only
+  `source_session_v1` registry currently rejects business-operation preparation;
+  this slice does not bypass that owner or enable a replacement instance.
+- `operation_agent_handoff.ts` owns admission, one-shot consumption,
+  reconciliation binding and bounded Inbox attention. Python supplies locked
+  canonical storage, original-registry facts and existing lifecycle guards;
+  it is not another decision owner.
+- Existing Lark prepare/deliver and authenticated callback handling are reused.
+  A successful confirmation leaves the original proposal claimed, with no
+  external result. Callback replay, simulator and card-delivery recovery must
+  never invoke this Agent's browser or adapter.
+- The existing manager Inbox projects locators directly from canonical
+  operations, without a copied approval record. Turn-start hooks include them
+  in `agent_read_required`. Consumed/unknown obligations sort before unconsumed
+  tickets; a 20-item page reports total count, typed overflow reason and next
+  operation ID rather than silently dropping work. Inspect that ID directly.
+- Dashboard details and the original Lark card use the shared operation frame:
+  confirmed/waiting for the original Agent; consumed/waiting for real evidence;
+  unknown/reconcile without resubmitting; and a separately verified result.
+  The Dashboard remains read-only for human operation confirmation. There is
+  no new configuration owner: the original request chooses the executor and
+  the existing channel/binding owner remains authoritative.
+
+### Original-runtime CLI
+
+Use the original registry and runtime, not a copied session or another home's
+records. These local continuation commands do not require Lark to be installed
+or reachable. Preparing/delivering new cards remains subject to its normal
+extension and authenticated-ingress checks.
+
+```sh
+loopx --registry REGISTRY --runtime-root RUNTIME goal-channel inspect-operation \
+  --goal-id GOAL --agent-id AGENT --proposal-id OPERATION \
+  --host-surface HOST --thread-id ORIGINAL_THREAD
+loopx --registry REGISTRY --runtime-root RUNTIME goal-channel consume-operation \
+  --goal-id GOAL --agent-id AGENT --proposal-id OPERATION \
+  --host-surface HOST --thread-id ORIGINAL_THREAD \
+  --consumption-id STABLE_ATTEMPT --execute
+loopx --registry REGISTRY --runtime-root RUNTIME goal-channel report-operation \
+  --goal-id GOAL --agent-id AGENT --proposal-id OPERATION \
+  --host-surface HOST --thread-id ORIGINAL_THREAD --outcome-json OUTCOME --execute
+```
+
+`inspect-operation` and a command without `--execute` never consume authority.
+Only the first successful atomic consumption returns `execution_allowed: true`.
+It verifies authenticated confirmation, immutable terms, the current original
+session, active Goal and expiry, then persists consumption before any browser
+effect. Every retry, including the same attempt after a lost response or
+restart, returns no execution permission. This intentionally does not promise
+exactly-once venue execution: ambiguity requires original-venue reconciliation.
+
+The original Agent reports `loopx_operation_outcome_v0` with the exact operation,
+payload and confirmation digests, claim, executor revision, consumption ID,
+`projection_verified: true`, `simulation: false`, bounded original evidence
+references and separate `external_write_performed`. Outcomes are `executed`,
+`not_executed` or `submission_unknown`. Unknown conservatively reports a possible
+external effect; a transport success cannot certify a trade or protection order.
+References must be safe opaque receipt identifiers, not credentials or private
+absolute paths. Domain evidence and private trading journals retain detail.
+
+### Recovery, delivery and remaining acceptance
+
+Consumed or unknown operations remain recovery obligations after expiry and
+session rebinding; those changes cannot grant a new execution. Evidence-only
+reporting may continue for a stopped/historical Goal through existing lifecycle
+guards. Existing exact-instance lifecycle guards remain in place, not an
+implicit migration into lifecycle-only registries or another home. Missing
+original Goal/Agent registration or an unsupported registry profile is an
+explicit error, not permission to transplant the operation.
+
+An unknown original outcome is immutable. A definitive report appends
+`operation.reconciliation` and binds `reconciles_outcome_digest` to the exact
+original unknown result. Only that evidence closes the recovery obligation.
+The original result card is updated by existing delivery recovery; an earlier
+unknown-result delivery cannot certify the reconciled result. Its readback must
+match the current `initial` or `reconciled` stage. None of these paths resubmits.
+
+The slice does **not** implement immediate host wakeup. Inbox visibility reports
+`host_delivery: "not_attempted"`; existing Turn/heartbeat reads are not a host
+delivery receipt. Host wakeup must later reuse the original host transport and
+publish truthful attempt/readback evidence, without starting a parallel resumed
+session. Local synthetic callback, CLI, concurrency, expiry, reconciliation and
+packaged-UI checks establish protocol behavior only. Installation, a genuine
+group click, original-Agent receipt consumption, real venue/protection evidence
+and original-card readback are still required before claiming a live minimum
+loop. No synthetic engineering card is sent to a live group for acceptance.
