@@ -1,0 +1,143 @@
+/** Agent execution is a continuation of the original typed operation, not a
+ * second approval store. Python supplies locked storage and registry facts;
+ * this owner decides admission, one-shot consumption and result binding. */
+import type {JsonObject} from "../effect_program.ts";
+import {EffectRuntimeConflictError, EffectRuntimeRequestError} from "../effect_runtime_errors.ts";
+import {requireJsonObject, requireNonEmptyString} from "../runtime_decode.ts";
+
+export const AGENT_OPERATION_REVISION = "agent-session-handoff-v0";
+const ID = /^[A-Za-z0-9._:-]{1,200}$/;
+
+function id(value: unknown, field: string): string {
+  const result = requireNonEmptyString(value, field);
+  if (!ID.test(result)) throw new EffectRuntimeRequestError(`${field} must be a compact opaque id`);
+  return result;
+}
+function requireThat(value: unknown, message: string): asserts value {
+  if (!value) throw new EffectRuntimeConflictError(message, "operation_handoff_conflict");
+}
+function timestamp(value: unknown): number {
+  const text = requireNonEmptyString(value, "operation timestamp");
+  const parsed = Date.parse(text);
+  if (!/(Z|[+-]\d\d:\d\d)$/.test(text) || !Number.isFinite(parsed)) {
+    throw new EffectRuntimeRequestError("operation timestamp requires a timezone");
+  }
+  return parsed;
+}
+
+export function normalizeAgentOperationExecutor(input: JsonObject): JsonObject {
+  const executor = requireJsonObject(input.executor, "agent executor");
+  const keys = ["kind", "host_surface", "thread_id", "revision"];
+  if (Object.keys(executor).length !== keys.length || keys.some(key => !(key in executor))
+    || executor.kind !== "agent_session" || executor.revision !== AGENT_OPERATION_REVISION) {
+    throw new EffectRuntimeRequestError("agent operation executor binding is invalid");
+  }
+  return {kind: "agent_session", host_surface: id(executor.host_surface, "host_surface"),
+    thread_id: id(executor.thread_id, "thread_id"), revision: AGENT_OPERATION_REVISION};
+}
+
+export function planAgentOperationHandoff(input: JsonObject): JsonObject {
+  const proposal = requireJsonObject(input.proposal, "proposal");
+  const parameters = requireJsonObject(proposal.normalized_parameters, "parameters");
+  const operation = requireJsonObject(proposal.operation, "operation");
+  const executor = normalizeAgentOperationExecutor({executor: parameters.executor});
+  const action = input.action;
+  const digests = requireJsonObject(input.digests, "locked operation digests");
+  requireThat(proposal.action_kind === "operation.execute" && operation.operation_id === proposal.proposal_id,
+    "agent handoff requires the original typed operation");
+  requireThat(digests.payload_digest === parameters.payload_digest && parameters.payload_digest === operation.payload_digest
+    && digests.projection_digest === parameters.projection_digest && parameters.projection_digest === operation.projection_digest
+    && digests.confirmation_digest === operation.confirmation_digest
+    && executor.revision === operation.executor_revision
+    && parameters.destination_account_ref === operation.destination_account_ref
+    && parameters.expires_at === operation.expires_at
+    && JSON.stringify(parameters.authorized_principals) === JSON.stringify(operation.authorized_principals),
+    "immutable operation binding drifted");
+  const confirmation = operation.confirmation == null ? null
+    : requireJsonObject(operation.confirmation, "operation confirmation");
+  const claim = operation.claim == null ? null : requireJsonObject(operation.claim, "operation claim");
+  const now = timestamp(input.now);
+  const expires = timestamp(operation.expires_at);
+  const route = {goal_id: parameters.goal_id, agent_id: parameters.agent_id,
+    host_surface: executor.host_surface, thread_id: executor.thread_id};
+  const base: JsonObject = {schema_version: "loopx_operation_agent_handoff_v0", operation_id: operation.operation_id,
+    payload_digest: operation.payload_digest, confirmation_digest: operation.confirmation_digest,
+    claim_id: claim?.claim_id ?? null, executor_revision: executor.revision, expires_at: operation.expires_at,
+    route, authorization_source: "canonical_typed_operation", execution_allowed: false,
+    host_delivery: "not_attempted", external_write_performed: false};
+  const handoff = operation.agent_handoff == null ? null
+    : requireJsonObject(operation.agent_handoff, "agent handoff");
+  const observed = operation.reconciliation ?? operation.outcome;
+  const unknownResult = observed != null
+    && requireJsonObject(observed, "observed result").outcome === "submission_unknown";
+  if (action === "project") {
+    return {...base, outcome_digest: digests.outcome_digest ?? null,
+      status: unknownResult ? "submission_unknown"
+      : operation.lifecycle_state === "outcome_observed" ? "outcome_observed"
+      : handoff ? "consumed_outcome_pending" : now >= expires ? "expired"
+      : operation.lifecycle_state === "claimed" ? "authorized_pending" : "awaiting_confirmation",
+      needs_reconciliation: unknownResult || (!!handoff && operation.lifecycle_state !== "outcome_observed")};
+  }
+  requireThat(confirmation?.decision === "confirm"
+    && confirmation.confirmation_digest === operation.confirmation_digest && claim,
+    "agent execution requires authenticated confirmation");
+  const actor = requireJsonObject(input.actor, "execution actor");
+  requireThat(Object.entries(route).every(([key, value]) => actor[key] === value),
+    "execution actor is not the original bound session");
+  if (action === "consume") {
+    requireThat(input.binding_current === true, "original session binding is no longer current");
+    // Even a same-id retry returns no execute permission. A lost response after
+    // this commit is ambiguous, never permission to submit a second order.
+    if (handoff || operation.lifecycle_state === "outcome_observed") {
+      return {...base, status: "already_consumed", needs_reconciliation: unknownResult || operation.lifecycle_state !== "outcome_observed"};
+    }
+    requireThat(operation.lifecycle_state === "claimed" && proposal.status === "applying", "operation is not claimed");
+    requireThat(now < expires, "confirmed operation expired before execution consumption");
+    return {...base, status: "consumed_outcome_pending", execution_allowed: true,
+      write_handoff: {...base, status: "consumed_outcome_pending", consumed_at: input.now,
+        consumption_id: id(input.consumption_id, "consumption_id")}};
+  }
+  if (action === "report") {
+    requireThat(handoff, "operation authorization has not been consumed");
+    const outcome = requireJsonObject(input.outcome, "operation outcome");
+    for (const key of ["operation_id", "payload_digest", "confirmation_digest", "claim_id", "executor_revision"]) {
+      requireThat(outcome[key] === base[key], "operation outcome does not match the consumed authorization");
+    }
+    requireThat(outcome.consumption_id === handoff.consumption_id, "operation consumption identity drifted");
+    requireThat(outcome.schema_version === "loopx_operation_outcome_v0" && outcome.projection_verified === true
+      && outcome.simulation === false && typeof outcome.external_write_performed === "boolean",
+      "agent result must separately disclose real external effect status");
+    requireThat(["executed", "not_executed", "submission_unknown"].includes(String(outcome.outcome)), "agent outcome is unsupported");
+    requireThat(Array.isArray(outcome.evidence_refs) && outcome.evidence_refs.length > 0
+      && outcome.evidence_refs.length <= 20 && outcome.evidence_refs.every(ref => typeof ref === "string" && ref.length > 0 && ref.length <= 512),
+      "agent outcome requires bounded original evidence references");
+    requireThat(outcome.outcome !== "executed" || outcome.external_write_performed === true,
+      "execution completion requires a disclosed external effect");
+    requireThat(outcome.outcome !== "not_executed" || outcome.external_write_performed === false,
+      "a no-execution result must not hide an external effect");
+    requireThat(outcome.outcome !== "submission_unknown" || outcome.external_write_performed === true,
+      "an ambiguous submission must conservatively disclose a possible external effect");
+    const original = operation.outcome == null ? null : requireJsonObject(operation.outcome, "original outcome");
+    if (original?.outcome === "submission_unknown" && outcome.outcome !== "submission_unknown") {
+      requireThat(outcome.reconciles_outcome_digest === digests.outcome_digest,
+        "reconciliation must reference the exact original unknown result");
+      return {...base, status: "outcome_observed", outcome, write_reconciliation: true};
+    }
+    return {...base, status: outcome.outcome === "submission_unknown" ? "submission_unknown" : "outcome_observed", outcome};
+  }
+  throw new EffectRuntimeRequestError("unsupported agent operation action");
+}
+
+/** Bounded attention does not discard original recovery obligations. The
+ * overflow locator can be inspected directly in the canonical action store. */
+export function projectAgentOperationInbox(input: JsonObject): JsonObject {
+  if (!Array.isArray(input.items)) throw new EffectRuntimeRequestError("handoff items must be an array");
+  const items = input.items.map(value => requireJsonObject(value, "handoff item"));
+  const rank = (item: JsonObject) => item.needs_reconciliation === true ? 0 : 1;
+  items.sort((a, b) => rank(a) - rank(b)
+    || String(a.operation_id).localeCompare(String(b.operation_id), "en"));
+  return {items: items.slice(0, 20), pending_count: items.length,
+    overflow: items.length > 20 ? {reason: "attention_page_capacity", count: items.length - 20,
+      next_operation_id: items[20].operation_id,
+      instruction: "Inspect the next original operation by id; do not treat this page as the entire inbox."} : null};
+}

@@ -10,10 +10,18 @@ import threading
 from typing import Any
 
 import pytest
+from argparse import Namespace
+import sys
 
 from loopx.chat_action_store import ActionConflictError, ChatActionStore
 from loopx.chat_actions import ChatActionService
-from loopx.cli_commands.goal_channel_operation import _prepare_goal_channel_operation
+from loopx.cli_commands.goal_channel_operation import (
+    GoalChannelOperationContext,
+    _prepare_goal_channel_operation,
+    run_goal_channel_operation,
+)
+from loopx.control_plane.collaboration.operation_handoff import agent_operation_action
+from loopx.control_plane.collaboration.inbox import pending
 from loopx.extensions.lark.goal_channel_contracts import (
     GOAL_CHANNEL_BINDING_SCHEMA_VERSION,
     write_goal_channel_binding,
@@ -42,6 +50,245 @@ OPERATOR_ID = "ou_operation_owner"
 CHAT_ID = "oc_operation_fixture"
 APP_ID = "cli_operation_fixture"
 TENANT_KEY = "tenant_operation_fixture"
+
+
+def _prepare_agent_handoff(store: ChatActionStore, registry: Path) -> dict[str, Any]:
+    baseline = _prepare(store, registry)
+    data = json.loads(registry.read_text())
+    data["goals"][0]["coordination"]["thread_agent_bindings"] = [
+        {
+            "agent_id": AGENT_ID,
+            "host_surface": "codex-app",
+            "thread_id": "thread-operation-fixture",
+        }
+    ]
+    registry.write_text(json.dumps(data))
+    parameters = dict(baseline["normalized_parameters"])
+    parameters.pop("projection_digest")
+    parameters["executor"] = {
+        "kind": "agent_session",
+        "host_surface": "codex-app",
+        "thread_id": "thread-operation-fixture",
+        "revision": "agent-session-handoff-v0",
+    }
+    parameters["operation_kind"] = "fixture.submit"
+    parameters["projection"] = {
+        **parameters["projection"],
+        "simulated": False,
+        "title": "Synthetic Agent execution handoff",
+        "warning": "Engineering fixture; never sent to a live provider.",
+    }
+    parameters["destination_account_ref"] = "account:synthetic-fixture"
+    return ChatActionService(store=store, registry_path=registry).preview(
+        {
+            "action_kind": "operation.execute",
+            "summary": "Synthetic original-Agent handoff",
+            "idempotency_key": "agent-operation-fixture-v1",
+            "context": {"kind": "goal", "goal_id": GOAL_ID},
+            "normalized_parameters": parameters,
+        }
+    )
+
+
+def test_authenticated_callback_hands_off_without_calling_any_executor_and_reconciles_original_result(
+    tmp_path: Path,
+) -> None:
+    store, registry, runtime, binding, target = _fixture(tmp_path)
+    proposal = _prepare_agent_handoff(store, registry)
+    cards: dict[str, dict[str, Any]] = {}
+    runner = _runner([], cards)
+    deliver_goal_channel_operation_card(
+        proposal_id=proposal["proposal_id"],
+        action_store_root=store.root,
+        runtime_root=runtime,
+        binding_path=binding,
+        target_path=target,
+        execute=True,
+        runner=runner,
+    )
+    delivered = store.load(proposal["proposal_id"])
+    card = cards[delivered["operation"]["delivery"]["message_id"]]
+    event = _event(delivered, card)
+
+    def no_executor(_proposal):
+        pytest.fail("a human callback must not run an Agent or simulation executor")
+
+    kwargs = dict(
+        runtime_root=runtime,
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+        executor=no_executor,
+    )
+    for invalid in [
+        {"operator_id": "ou_wrong_operator"},
+        {"message_id": "om_wrong_card"},
+    ]:
+        with pytest.raises(ActionConflictError):
+            handle_goal_channel_operation_callback({**event, **invalid}, **kwargs)
+    first = handle_goal_channel_operation_callback(event, **kwargs)
+    replay = handle_goal_channel_operation_callback(event, **kwargs)
+    assert first["status"] == replay["status"] == "authorization_pending"
+    assert first["outcome"] is None and not first["domain_external_write_performed"]
+    assert first["callback_ack_is_execution_receipt"] is False
+    claimed = store.load(proposal["proposal_id"])
+    assert claimed["operation"]["result_delivery"] is None
+    assert "等待原 Agent" in normalized_card_text(next(iter(cards.values())))
+    actor = {
+        "goal_id": GOAL_ID,
+        "agent_id": AGENT_ID,
+        "host_surface": "codex-app",
+        "thread_id": "thread-operation-fixture",
+    }
+    context = GoalChannelOperationContext(runtime, registry, runtime, binding)
+    args = Namespace(
+        goal_channel_command="consume-operation",
+        goal_id=GOAL_ID,
+        agent_id=AGENT_ID,
+        proposal_id=proposal["proposal_id"],
+        host_surface="codex-app",
+        thread_id="thread-operation-fixture",
+        consumption_id="attempt-1",
+        execute=False,
+    )
+    dry = run_goal_channel_operation(args, context=context)
+    assert dry["execution_allowed"] is False and not store.load(
+        proposal["proposal_id"]
+    )["operation"].get("agent_handoff")
+    args.execute = True
+    consumed = run_goal_channel_operation(args, context=context)
+    assert consumed["execution_allowed"] is True
+    assert (
+        run_goal_channel_operation(args, context=context)["execution_allowed"] is False
+    )
+    operation = claimed["operation"]
+    unknown = {
+        "schema_version": "loopx_operation_outcome_v0",
+        "operation_id": proposal["proposal_id"],
+        "payload_digest": operation["payload_digest"],
+        "confirmation_digest": operation["confirmation_digest"],
+        "claim_id": operation["claim"]["claim_id"],
+        "executor_revision": operation["executor_revision"],
+        "consumption_id": "attempt-1",
+        "projection_verified": True,
+        "simulation": False,
+        "outcome": "submission_unknown",
+        "external_write_performed": True,
+        "summary": "Synthetic submission result is unknown; do not resubmit.",
+        "evidence_refs": ["receipt:unknown-fixture"],
+    }
+    outcome_path = tmp_path / "outcome.json"
+    outcome_path.write_text(json.dumps(unknown))
+    report_args = Namespace(
+        **{
+            **vars(args),
+            "goal_channel_command": "report-operation",
+            "outcome_json": str(outcome_path),
+        }
+    )
+    reported = run_goal_channel_operation(report_args, context=context)
+    assert (
+        reported["status"] == "submission_unknown" and reported["needs_reconciliation"]
+    )
+    assert pending(runtime, GOAL_ID, AGENT_ID)["operation_handoffs"][0][
+        "needs_reconciliation"
+    ]
+    recovered = recover_goal_channel_operation_results(
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        allowed_chat_ids={CHAT_ID},
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+    )
+    assert recovered["delivered"] == 1
+    assert "不可重复提交" in normalized_card_text(next(iter(cards.values())))
+    final = {
+        **unknown,
+        "outcome": "not_executed",
+        "external_write_performed": False,
+        "summary": "Synthetic original venue evidence proves no submission.",
+        "reconciles_outcome_digest": _digest(unknown),
+        "evidence_refs": ["receipt:reconciled-fixture"],
+    }
+    outcome_path.write_text(json.dumps(final))
+    assert run_goal_channel_operation(report_args, context=context)["outcome"] == final
+    updated = store.load(proposal["proposal_id"])
+    frame = goal_channel_operation._operation_review_frame(updated)
+    assert frame["resultDeliveryVerified"] is False
+    assert frame["resultKind"] == "not_executed"
+    recovered = recover_goal_channel_operation_results(
+        action_store_root=store.root,
+        profile_app_id=APP_ID,
+        allowed_chat_ids={CHAT_ID},
+        cli_bin="lark-cli",
+        profile="operation-bot",
+        runner=runner,
+    )
+    assert recovered["delivered"] == 1
+    assert "已结束，未执行" in normalized_card_text(next(iter(cards.values())))
+    assert store.load(proposal["proposal_id"])["operation"]["outcome"] == unknown
+    assert (
+        store.load(proposal["proposal_id"])["operation"]["result_delivery"][
+            "outcome_stage"
+        ]
+        == "reconciled"
+    )
+    assert (
+        run_goal_channel_operation(args, context=context)["execution_allowed"] is False
+    )
+    assert "operation_handoffs" not in pending(runtime, GOAL_ID, AGENT_ID)
+    assert (
+        agent_operation_action(
+            runtime,
+            registry,
+            proposal_id=proposal["proposal_id"],
+            actor=actor,
+            action="inspect",
+        )["execution_allowed"]
+        is False
+    )
+
+
+def test_real_cli_inspects_canonical_handoff_in_source_runtime(tmp_path: Path) -> None:
+    store, registry, runtime, _binding, _target = _fixture(tmp_path)
+    proposal = _prepare_agent_handoff(store, registry)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "loopx.cli",
+            "--format",
+            "json",
+            "--registry",
+            str(registry),
+            "--runtime-root",
+            str(runtime),
+            "goal-channel",
+            "inspect-operation",
+            "--goal-id",
+            GOAL_ID,
+            "--agent-id",
+            AGENT_ID,
+            "--proposal-id",
+            proposal["proposal_id"],
+            "--host-surface",
+            "codex-app",
+            "--thread-id",
+            "thread-operation-fixture",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    packet = json.loads(result.stdout)
+    assert (
+        packet["status"] == "awaiting_confirmation"
+        and packet["execution_allowed"] is False
+    )
 
 
 def _digest(value: object) -> str:

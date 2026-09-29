@@ -41,12 +41,13 @@ export type OperationReviewFrame = OperationReviewFrameBase & (
       kind: "pending";
       attentionKind: "progress";
       interactionMode: "inform";
+      executionState?: "authorized_pending" | "consumed_outcome_pending";
     }
   | {
       kind: "result";
       attentionKind: "progress";
       interactionMode: "inform";
-      resultKind: "rejected" | "simulation_completed" | "completed";
+      resultKind: "rejected" | "simulation_completed" | "completed" | "unknown" | "not_executed";
       resultDeliveryVerified: boolean;
       summary: string;
     }
@@ -321,9 +322,12 @@ export function compileOperationReviewFrame(proposalValue: unknown): OperationRe
       kind: "pending",
       attentionKind: "progress",
       interactionMode: "inform",
+      ...(objectValue(parameters.executor)?.kind === "agent_session"
+        ? {executionState: objectValue(operation.agent_handoff) ? "consumed_outcome_pending" as const : "authorized_pending" as const}
+        : {}),
     };
   }
-  const outcome = objectValue(operation.outcome);
+  const outcome = objectValue(operation.reconciliation) ?? objectValue(operation.outcome);
   if (!outcome) return undefined;
   const rejected = outcome.outcome === "rejected_by_operator";
   const simulated = outcome.simulation === true || base.simulated;
@@ -332,8 +336,11 @@ export function compileOperationReviewFrame(proposalValue: unknown): OperationRe
     kind: "result",
     attentionKind: "progress",
     interactionMode: "inform",
-    resultKind: rejected ? "rejected" : simulated ? "simulation_completed" : "completed",
-    resultDeliveryVerified: objectValue(operation.result_delivery) !== null,
+    resultKind: outcome.outcome === "submission_unknown" ? "unknown" : outcome.outcome === "not_executed" ? "not_executed"
+      : rejected ? "rejected" : simulated ? "simulation_completed" : "completed",
+    resultDeliveryVerified: objectValue(operation.result_delivery) !== null
+      && (objectValue(parameters.executor)?.kind !== "agent_session"
+        || objectValue(operation.result_delivery)?.outcome_stage === (operation.reconciliation ? "reconciled" : "initial")),
     summary: textValue(outcome.summary) ?? "",
   };
 }
@@ -369,9 +376,12 @@ export function compileActionReviewPlan(proposalValue: unknown): ActionReviewPla
   if ((lifecycle && proposal.gate != null) || proposal.status === "gated") return held("gated", "authority_gate");
   if ((lifecycle && proposal.stale != null) || proposal.status === "stale") return held("refresh", "stale_proposal");
   if (proposal.status === "applied") {
+    if (operationFrame?.kind === "result" && operationFrame.resultKind === "unknown") {
+      return held("repair", "readback_unverified");
+    }
     const receipt = objectValue(proposal.receipt);
     return receipt?.projection_verified === true
-      && (proposal.action_kind !== "operation.execute" || objectValue(objectValue(proposal.operation)?.result_delivery) !== null)
+      && (proposal.action_kind !== "operation.execute" || (operationFrame?.kind === "result" && operationFrame.resultDeliveryVerified))
       ? held("completed", "readback_verified")
       : held("repair", "readback_unverified");
   }

@@ -147,22 +147,67 @@ class ChatActionNormalizationMixin:
             normalized_projection["fields"] = normalized_fields
 
             raw_executor = values.get("executor")
-            if not isinstance(raw_executor, Mapping) or set(raw_executor) != {
+            origin_goal_ref = None
+            if (
+                isinstance(raw_executor, Mapping)
+                and raw_executor.get("kind") == "agent_session"
+            ):
+                from .control_plane.collaboration.goal_instance_scope import (
+                    collaboration_goal_scope,
+                )
+                from .control_plane.effect_runtime import (
+                    EffectRuntimeRejected,
+                    effect_runtime_result,
+                )
+                from .control_plane.goals.activation import goal_is_stopped
+                from .thread_agent_binding import resolve_registry_thread_agent_binding
+
+                try:
+                    executor = dict(
+                        effect_runtime_result(
+                            "operation.agent_executor.normalize",
+                            {"executor": dict(raw_executor)},
+                        )
+                    )
+                except EffectRuntimeRejected as exc:
+                    raise ValueError(str(exc)) from exc
+                binding = resolve_registry_thread_agent_binding(
+                    registry_path=self.registry_path,
+                    host_surface=str(executor["host_surface"]),
+                    thread_id=str(executor["thread_id"]),
+                )
+                if binding.get("status") != "bound" or (
+                    binding.get("goal_id"),
+                    binding.get("agent_id"),
+                ) != (goal_id, agent_id):
+                    raise ValueError(
+                        "agent operation requires the original registered session"
+                    )
+                if normalized_projection["simulated"] is not False:
+                    raise ValueError(
+                        "agent execution handoff cannot masquerade as simulation"
+                    )
+                with collaboration_goal_scope(
+                    self.registry_path,
+                    goal_id=goal_id,
+                    agents=(agent_id,),
+                    require_active=True,
+                ) as scope:
+                    if goal_is_stopped(scope.goal):
+                        raise ValueError("agent operation Goal is stopped")
+                    origin_goal_ref = scope.current_goal_ref
+            elif not isinstance(raw_executor, Mapping) or set(raw_executor) != {
                 "extension_id",
                 "protocol",
                 "permission",
                 "revision",
             }:
                 raise ValueError("operation executor binding is invalid")
-            executor = {
-                field: _opaque(raw_executor.get(field), field=f"executor.{field}")
-                for field in (
-                    "extension_id",
-                    "protocol",
-                    "permission",
-                    "revision",
-                )
-            }
+            else:
+                executor = {
+                    field: _opaque(raw_executor.get(field), field=f"executor.{field}")
+                    for field in ("extension_id", "protocol", "permission", "revision")
+                }
             expires_at = parse_timestamp(
                 _text(values.get("expires_at"), field="expires_at", limit=80)
             )
@@ -211,6 +256,11 @@ class ChatActionNormalizationMixin:
                 "expires_at": utc_isoformat(expires_at),
                 "authorized_principals": principals,
                 "executor": executor,
+                **(
+                    {"origin_goal_ref": origin_goal_ref}
+                    if origin_goal_ref is not None
+                    else {}
+                ),
             }
         if action_kind == "todo.create":
             values = self._allowed_parameters(
