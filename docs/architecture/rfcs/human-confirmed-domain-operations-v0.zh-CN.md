@@ -256,7 +256,10 @@ M1 同时涵盖 UI 与后端，不要拆成“后端 PR 已完成”而遗忘前
 - 原 manager Inbox 直接从规范操作投影定位信息，不复制审批记录。Turn-start hook
   将它计入 `agent_read_required`。已消费/未知结果义务先于未消费票据展示；每页 20 条
   之外明确给出总数量、类型化 overflow 原因及下一条操作 ID，不静默丢弃工作；可按该
-  ID 直接检查原操作。
+  ID 直接检查原操作，并用独立的 `operation_handoff_next_cursor` 通过
+  `manager-inbox read --operation-cursor CURSOR` 逐页找回其余操作，即使前 20 条未知
+  结果长期未解决。游标绑定原 runtime/Goal/Agent 范围，与普通请求游标独立；新增或
+  改变的工作应无游标重读，遍历结束不代表义务已解决。
 - Dashboard 详情与原 Lark 卡使用同一操作 frame：已确认待原 Agent、已消费待真实
   证据、未知须对账不得重提，以及独立核验的结果。Dashboard 对用户操作确认保持只读。
   不新增配置权威：执行器由原请求选择，原渠道/绑定 owner 仍是权威。
@@ -280,11 +283,21 @@ loopx --registry REGISTRY --runtime-root RUNTIME goal-channel report-operation \
   --host-surface HOST --thread-id ORIGINAL_THREAD --outcome-json OUTCOME --execute
 ```
 
-`inspect-operation` 和没有 `--execute` 的命令均不消费授权。只有首次成功的原子消费
+`inspect-operation` 和没有 `--execute` 的命令均不消费授权。三个 CLI 命令均要求
+既有宿主导出的环境线程（例如 `CODEX_THREAD_ID`）匹配原路由；命令行标识只是选择器，
+不是调用者认证。环境缺失、不匹配或不支持的宿主在读取私有参数或写回之前即拒绝。
+返回的 `caller_context_source: trusted_local_host_environment` 明确表示可信本地
+OS 用户边界，**不等于密码学 session 隔离**。能伪造环境或改写同用户规范文件的恶意
+进程不在本切片保证内；不得宣称在不可信进程间独占执行，这需要另行验收经认证的宿主
+传输。内部存储 adapter 只接收宿主已验证的 actor 事实，不接受未认证的网络请求。
+只有首次成功的原子消费
 返回 `execution_allowed: true`。它检查经认证的确认、不可变条款、原 session 当前绑定、
 有效 Goal 与到期时间，并在任何浏览器操作之前持久记录消费。所有重试，包括响应丢失
 或重启后使用同一 attempt，均不再获得执行许可。这不承诺平台恰好执行一次；存在歧义
 必须按原平台证据对账。
+绑定/注册/启用状态读取和消费提交共享既有 registry writer 锁，顺序为 Goal 生命周期
+→ registry → action store。先提交的撤销阻止消费；排在消费之后的撤销不能追溯抹除
+已提交的回执。锁在外部执行前释放，不宣称约束其后的外部操作。
 
 原 Agent 回写 `loopx_operation_outcome_v0`，绑定精确 operation、载荷与确认摘要、
 claim、执行器 revision、consumption ID，要求 `projection_verified: true`、

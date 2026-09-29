@@ -323,7 +323,11 @@ choose a venue, resume a browser, sign or submit an order.
   operations, without a copied approval record. Turn-start hooks include them
   in `agent_read_required`. Consumed/unknown obligations sort before unconsumed
   tickets; a 20-item page reports total count, typed overflow reason and next
-  operation ID rather than silently dropping work. Inspect that ID directly.
+  operation ID plus an independent `operation_handoff_next_cursor`. Continue
+  with `manager-inbox read --operation-cursor CURSOR` even when the first 20
+  unknown outcomes remain unresolved. The cursor is bound to the original
+  runtime/Goal/Agent scope, not the ordinary request cursor. Restart without it
+  for new/changed work; finishing a page sequence does not resolve obligations.
 - Dashboard details and the original Lark card use the shared operation frame:
   confirmed/waiting for the original Agent; consumed/waiting for real evidence;
   unknown/reconcile without resubmitting; and a separately verified result.
@@ -352,12 +356,28 @@ loopx --registry REGISTRY --runtime-root RUNTIME goal-channel report-operation \
 ```
 
 `inspect-operation` and a command without `--execute` never consume authority.
+All three CLI commands require the existing host-exported ambient thread
+(for example, `CODEX_THREAD_ID`) to match the original route; CLI identifiers
+are selectors, not caller authentication. Missing, foreign or unsupported host
+context fails closed before inspecting private parameters or writing a receipt.
+The returned `caller_context_source: trusted_local_host_environment` names a
+trusted-local-OS-user fence, **not cryptographic session isolation**. A hostile
+process that can forge the environment or rewrite the same user's canonical
+files is outside this slice. Do not advertise exclusive execution across
+untrusted processes; that requires an independently qualified authenticated
+host transport. Internal storage adapters accept host-validated actor facts,
+not unauthenticated network requests.
 Only the first successful atomic consumption returns `execution_allowed: true`.
 It verifies authenticated confirmation, immutable terms, the current original
 session, active Goal and expiry, then persists consumption before any browser
 effect. Every retry, including the same attempt after a lost response or
 restart, returns no execution permission. This intentionally does not promise
 exactly-once venue execution: ambiguity requires original-venue reconciliation.
+Binding/registration/activation read and consumption commit hold the existing
+registry-writer lock, in Goal-lifetime → registry → action-store order.
+Revocation that commits first prevents consumption; revocation waiting behind
+a consumption cannot retroactively revoke the already committed receipt. The
+lock is released before external work and never claims to fence that work.
 
 The original Agent reports `loopx_operation_outcome_v0` with the exact operation,
 payload and confirmation digests, claim, executor revision, consumption ID,

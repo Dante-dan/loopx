@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type {JsonObject} from "../../loopx/control_plane/effect_program.ts";
-import {AGENT_OPERATION_REVISION, normalizeAgentOperationExecutor, planAgentOperationHandoff,
+import {AGENT_OPERATION_REVISION, deriveAgentOperationActor, normalizeAgentOperationExecutor, planAgentOperationHandoff,
   projectAgentOperationInbox} from "../../loopx/control_plane/work_items/operation_agent_handoff.ts";
 
 function input(): JsonObject {
@@ -21,6 +21,17 @@ function input(): JsonObject {
       normalized_parameters: parameters, operation}};
 }
 const operation = (value: JsonObject) => (value.proposal as JsonObject).operation as JsonObject;
+
+test("caller selectors cannot replace missing or foreign host context", () => {
+  const requested = input().actor as JsonObject;
+  for (const thread_id of [null, "", "another-thread"]) {
+    assert.throws(() => deriveAgentOperationActor({requested, ambient: {host_surface: "codex-app", thread_id}}));
+  }
+  assert.throws(() => deriveAgentOperationActor({requested,
+    ambient: {host_surface: "unsupported-host", thread_id: "original-thread"}}));
+  assert.deepEqual(deriveAgentOperationActor({requested,
+    ambient: {host_surface: "codex-app", thread_id: "original-thread"}}), requested);
+});
 
 test("only the first consumed canonical confirmation grants the original session execution", () => {
   const value = input();
@@ -81,11 +92,17 @@ test("unknown submission remains a reconciliation obligation after expiry with n
 test("bounded inbox retains recovery first and declares overflow instead of silently discarding it", () => {
   const items = Array.from({length: 22}, (_, index) => ({operation_id: `operation-${String(index).padStart(2, "0")}`,
     needs_reconciliation: index === 21, execution_allowed: false}));
-  const page = projectAgentOperationInbox({items});
+  const cursor_scope = "a".repeat(64);
+  const page = projectAgentOperationInbox({items, cursor_scope});
   assert.equal((page.items as JsonObject[]).length, 20);
   assert.equal((page.items as JsonObject[])[0].operation_id, "operation-21");
   assert.equal(page.pending_count, 22);
   assert.equal((page.overflow as JsonObject).count, 2);
   assert.equal((page.overflow as JsonObject).next_operation_id, "operation-19");
   assert.equal(items[0].operation_id, "operation-00");
+  const rest = projectAgentOperationInbox({items, cursor_scope, cursor: page.next_cursor});
+  assert.deepEqual((rest.items as JsonObject[]).map(item => item.operation_id), ["operation-19", "operation-20"]);
+  assert.equal(rest.next_cursor, null);
+  assert.equal(rest.pending_count, 22);
+  assert.throws(() => projectAgentOperationInbox({items, cursor_scope: "b".repeat(64), cursor: page.next_cursor}));
 });

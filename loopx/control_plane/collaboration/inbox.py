@@ -123,6 +123,7 @@ def pending(
     agent_id: str,
     *,
     cursor: str | None = None,
+    operation_cursor: str | None = None,
     scope: CollaborationGoalScope | None = None,
 ) -> dict:
     cursor_scope = _hash(
@@ -217,6 +218,8 @@ def pending(
         agent_id,
         registry_path=scope.registry_path if scope is not None else None,
         scope=scope,
+        cursor=operation_cursor,
+        cursor_scope=cursor_scope,
     )
     return {
         "ok": True,
@@ -225,8 +228,9 @@ def pending(
                 "operation_handoffs": operation_handoffs["items"],
                 "operation_handoff_pending_count": operation_handoffs["pending_count"],
                 "operation_handoff_overflow": operation_handoffs["overflow"],
+                "operation_handoff_next_cursor": operation_handoffs["next_cursor"],
             }
-            if operation_handoffs["items"]
+            if operation_handoffs["items"] or operation_cursor is not None
             else {}
         ),
         **({"peer_returns": peer_returns} if peer_returns["items"] else {}),

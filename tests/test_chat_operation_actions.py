@@ -48,8 +48,16 @@ def _agent_request(service: ChatActionService) -> dict[str, object]:
     return request
 
 
-def _claim_agent_operation(service: ChatActionService, store: ChatActionStore) -> dict:
-    proposal = service.preview(_agent_request(service))
+def _claim_agent_operation(
+    service: ChatActionService,
+    store: ChatActionStore,
+    *,
+    idempotency_key: str | None = None,
+) -> dict:
+    request = _agent_request(service)
+    if idempotency_key is not None:
+        request["idempotency_key"] = idempotency_key
+    proposal = service.preview(request)
     delivered = store.record_operation_delivery(
         proposal["proposal_id"], delivery=_delivery(proposal)
     )
@@ -117,6 +125,13 @@ def test_agent_handoff_requires_confirmation_and_original_session(
         preview["status"] == "awaiting_confirmation"
         and preview["execution_allowed"] is False
     )
+    with pytest.raises(ActionConflictError, match="original bound session"):
+        agent_operation_action(
+            runtime,
+            service.registry_path,
+            action="inspect",
+            **{**args, "actor": {**EXECUTION_ACTOR, "thread_id": "thread-other"}},
+        )
     with pytest.raises(ActionConflictError, match="authenticated confirmation"):
         agent_operation_action(
             runtime,
@@ -241,6 +256,95 @@ def test_agent_handoff_fails_closed_on_expiry_binding_activation_or_terms_drift(
             consumption_id="attempt-1",
         )
     assert store.path.read_bytes() == before
+
+
+def test_binding_revocation_and_consumption_share_the_registry_commit_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+    from threading import Event
+    from loopx.control_plane.projects import registry_codec
+    from loopx.control_plane.collaboration import operation_handoff
+    from loopx.thread_agent_binding import unbind_thread_agent_in_registry
+
+    service, store = _service(tmp_path)
+    proposal = _claim_agent_operation(service, store)
+    attempted, acquired = Event(), Event()
+    original_transaction = registry_codec._registry_transaction
+    original_binding = operation_handoff._binding
+    original_write = ChatActionStore._write
+    commits = []
+
+    @contextmanager
+    def observed_transaction(*args, **kwargs):
+        attempted.set()
+        with original_transaction(*args, **kwargs) as transaction:
+            acquired.set()
+            yield transaction
+
+    def revoke():
+        result = unbind_thread_agent_in_registry(
+            registry_path=service.registry_path,
+            goal_id=GOAL_ID,
+            host_surface=EXECUTION_ACTOR["host_surface"],
+            thread_id=EXECUTION_ACTOR["thread_id"],
+            agent_id=EXECUTION_ACTOR["agent_id"],
+            execute=True,
+        )
+        assert result["written"] is True
+        commits.append("revocation")
+
+    def record_consumption(self, payload):
+        original_write(self, payload)
+        commits.append("consumption")
+
+    monkeypatch.setattr(registry_codec, "_registry_transaction", observed_transaction)
+    monkeypatch.setattr(ChatActionStore, "_write", record_consumption)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        futures = []
+
+        def interleaved_binding(*args):
+            current = original_binding(*args)
+            futures.append(executor.submit(revoke))
+            assert attempted.wait(5)
+            assert not acquired.wait(0.2), (
+                "revocation cannot commit between binding read and consumption"
+            )
+            return current
+
+        monkeypatch.setattr(operation_handoff, "_binding", interleaved_binding)
+        result = agent_operation_action(
+            store.root.parent.parent,
+            service.registry_path,
+            proposal_id=proposal["proposal_id"],
+            actor=EXECUTION_ACTOR,
+            action="consume",
+            consumption_id="attempt-1",
+        )
+        assert result["execution_allowed"] is True
+        futures[0].result(timeout=5)
+    assert commits == ["consumption", "revocation"]
+    monkeypatch.setattr(operation_handoff, "_binding", original_binding)
+    before = store.path.read_bytes()
+    with pytest.raises(ActionConflictError, match="binding is no longer current"):
+        agent_operation_action(
+            store.root.parent.parent,
+            service.registry_path,
+            proposal_id=proposal["proposal_id"],
+            actor=EXECUTION_ACTOR,
+            action="consume",
+            consumption_id="attempt-2",
+        )
+    assert store.path.read_bytes() == before
+    report = agent_operation_action(
+        store.root.parent.parent,
+        service.registry_path,
+        proposal_id=proposal["proposal_id"],
+        actor=EXECUTION_ACTOR,
+        action="report",
+        outcome=_agent_result(proposal, "attempt-1", result="not_executed"),
+    )
+    assert report["execution_allowed"] is False
 
 
 @pytest.mark.parametrize(
@@ -415,36 +519,91 @@ def test_lifecycle_only_source_profile_cannot_acquire_new_operation_authority(
 
 
 def test_inbox_uses_shared_recovery_priority_and_explicit_overflow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    from copy import deepcopy
+    import subprocess
+    import sys
 
     service, store = _service(tmp_path)
-    original = _claim_agent_operation(service, store)
-    proposals = []
+    operation_ids = set()
     for index in range(22):
-        projected = deepcopy(original)
-        projected["proposal_id"] = projected["operation"]["operation_id"] = (
-            f"operation-{index:02}"
+        proposal = _claim_agent_operation(
+            service, store, idempotency_key=f"overflow-{index}"
         )
-        if index == 21:
-            projected["operation"].update(
-                lifecycle_state="outcome_observed",
-                agent_handoff={"consumption_id": "attempt-1"},
-                outcome={"outcome": "submission_unknown"},
-            )
-        proposals.append(projected)
-    monkeypatch.setattr(ChatActionStore, "list", lambda *args, **kwargs: proposals)
+        operation_ids.add(proposal["proposal_id"])
+        args = dict(proposal_id=proposal["proposal_id"], actor=EXECUTION_ACTOR)
+        agent_operation_action(
+            store.root.parent.parent,
+            service.registry_path,
+            action="consume",
+            consumption_id="attempt-1",
+            **args,
+        )
+        agent_operation_action(
+            store.root.parent.parent,
+            service.registry_path,
+            action="report",
+            outcome=_agent_result(proposal, "attempt-1", result="submission_unknown"),
+            **args,
+        )
     inbox = pending(store.root.parent.parent, GOAL_ID, EXECUTION_ACTOR["agent_id"])
     assert len(inbox["operation_handoffs"]) == 20
-    assert inbox["operation_handoffs"][0]["operation_id"] == "operation-21"
     assert inbox["operation_handoff_pending_count"] == 22
-    assert inbox["operation_handoff_overflow"] == {
-        "reason": "attention_page_capacity",
-        "count": 2,
-        "next_operation_id": "operation-19",
-        "instruction": "Inspect the next original operation by id; do not treat this page as the entire inbox.",
-    }
+    assert inbox["operation_handoff_overflow"]["reason"] == "attention_page_capacity"
+    assert inbox["operation_handoff_overflow"]["count"] == 2
+    cursor = inbox["operation_handoff_next_cursor"]
+    assert cursor == inbox["operation_handoff_overflow"]["next_cursor"]
+    before = store.path.read_bytes()
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "loopx.cli",
+            "--format",
+            "json",
+            "--registry",
+            str(service.registry_path),
+            "--runtime-root",
+            str(store.root.parent.parent),
+            "manager-inbox",
+            "read",
+            "--goal-id",
+            GOAL_ID,
+            "--agent-id",
+            EXECUTION_ACTOR["agent_id"],
+            "--operation-cursor",
+            cursor,
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    rest = json.loads(process.stdout)
+    assert len(rest["operation_handoffs"]) == 2
+    assert rest["operation_handoff_next_cursor"] is None
+    assert rest["operation_handoff_pending_count"] == 22
+    assert {
+        item["operation_id"]
+        for item in [*inbox["operation_handoffs"], *rest["operation_handoffs"]]
+    } == operation_ids
+    assert all(
+        item["needs_reconciliation"]
+        for item in [*inbox["operation_handoffs"], *rest["operation_handoffs"]]
+    )
+    assert store.path.read_bytes() == before
+    assert (
+        len(
+            pending(store.root.parent.parent, GOAL_ID, EXECUTION_ACTOR["agent_id"])[
+                "operation_handoffs"
+            ]
+        )
+        == 20
+    )
+    with pytest.raises(ValueError, match="cursor scope mismatch"):
+        pending(
+            store.root.parent.parent, GOAL_ID, "other-agent", operation_cursor=cursor
+        )
 
 
 def _digest(value: object) -> str:

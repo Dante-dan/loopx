@@ -47,13 +47,19 @@ def pending_operation_handoffs(
     *,
     registry_path: Path | None = None,
     scope: CollaborationGoalScope | None = None,
+    cursor: str | None = None,
+    cursor_scope: str,
 ) -> dict[str, Any]:
     """Project canonical tickets into the existing Inbox; do not copy authority."""
-    if not (runtime_root / "chat" / "actions" / "actions.json").is_file():
-        return {"items": [], "pending_count": 0, "overflow": None}
-    store = _store(runtime_root)
+    store = (
+        _store(runtime_root)
+        if (runtime_root / "chat" / "actions" / "actions.json").is_file()
+        else None
+    )
+    if store is None and cursor is None:
+        return {"items": [], "pending_count": 0, "overflow": None, "next_cursor": None}
     result = []
-    for proposal in store.list(goal_id=goal_id):
+    for proposal in store.list(goal_id=goal_id) if store is not None else []:
         parameters = proposal.get("normalized_parameters") or {}
         executor = parameters.get("executor") or {}
         if (
@@ -89,17 +95,29 @@ def pending_operation_handoffs(
                 "summary": proposal["summary"],
                 "instruction": "Read the original canonical operation and consume it once before any external effect. "
                 "Only the first successful consumption permits execution; consumed/unknown results require "
-                "original venue reconciliation, never another submission. Inbox delivery is not trade authority.",
+                "original external-system reconciliation, never another submission. Inbox delivery is not execution authority.",
                 "next_action": "goal-channel consume-operation"
                 if plan["status"] == "authorized_pending"
                 else "Reconcile the original external result; do not submit again.",
             }
         )
-    from ..effect_runtime import effect_runtime_result
+    if not result and cursor is None:
+        return {"items": [], "pending_count": 0, "overflow": None, "next_cursor": None}
+    from ..effect_runtime import EffectRuntimeRejected, effect_runtime_result
 
-    return dict(
-        effect_runtime_result("operation.agent_handoff.inbox", {"items": result})
-    )
+    try:
+        return dict(
+            effect_runtime_result(
+                "operation.agent_handoff.inbox",
+                {
+                    "items": result,
+                    "cursor": cursor,
+                    "cursor_scope": cursor_scope,
+                },
+            )
+        )
+    except EffectRuntimeRejected as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def agent_operation_action(
@@ -128,6 +146,7 @@ def agent_operation_action(
         agents=(actor["agent_id"],),
         caller_goal_ref=parameters.get("origin_goal_ref"),
         require_active=action == "consume",
+        lock_registry=action == "consume",
     ) as scope:
         if action == "consume":
             decide_collaboration_lifecycle(scope, operation="request_create")
@@ -144,7 +163,9 @@ def agent_operation_action(
             )
         current = _binding(registry_path, parameters)
         if action == "inspect":
-            plan = store._agent_operation_plan(proposal, action="project")
+            plan = store._agent_operation_plan(
+                proposal, action="inspect", actor=dict(actor)
+            )
             return {
                 **plan,
                 "binding_current": current,

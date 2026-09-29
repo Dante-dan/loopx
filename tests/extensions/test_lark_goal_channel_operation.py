@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from collections.abc import Mapping
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import threading
@@ -92,7 +93,9 @@ def _prepare_agent_handoff(store: ChatActionStore, registry: Path) -> dict[str, 
 
 def test_authenticated_callback_hands_off_without_calling_any_executor_and_reconciles_original_result(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-operation-fixture")
     store, registry, runtime, binding, target = _fixture(tmp_path)
     proposal = _prepare_agent_handoff(store, registry)
     cards: dict[str, dict[str, Any]] = {}
@@ -158,8 +161,17 @@ def test_authenticated_callback_hands_off_without_calling_any_executor_and_recon
         proposal["proposal_id"]
     )["operation"].get("agent_handoff")
     args.execute = True
+    before = store.path.read_bytes()
+    for ambient_thread in ["", "thread-unrelated-fixture"]:
+        monkeypatch.setenv("CODEX_THREAD_ID", ambient_thread)
+        rejected = run_goal_channel_operation(args, context=context)
+        assert rejected["ok"] is False
+        assert rejected["blocker"] == "operation_handoff_conflict"
+        assert store.path.read_bytes() == before
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-operation-fixture")
     consumed = run_goal_channel_operation(args, context=context)
     assert consumed["execution_allowed"] is True
+    assert consumed["caller_context_source"] == "trusted_local_host_environment"
     assert (
         run_goal_channel_operation(args, context=context)["execution_allowed"] is False
     )
@@ -283,12 +295,40 @@ def test_real_cli_inspects_canonical_handoff_in_source_runtime(tmp_path: Path) -
         capture_output=True,
         check=True,
         timeout=30,
+        env={**os.environ, "CODEX_THREAD_ID": "thread-operation-fixture"},
     )
     packet = json.loads(result.stdout)
     assert (
         packet["status"] == "awaiting_confirmation"
         and packet["execution_allowed"] is False
     )
+    before = store.path.read_bytes()
+    wrong_thread = subprocess.run(
+        [*result.args[:-1], "thread-other"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env={**os.environ, "CODEX_THREAD_ID": "thread-operation-fixture"},
+    )
+    assert wrong_thread.returncode == 1
+    assert json.loads(wrong_thread.stdout)["blocker"] == "operation_handoff_conflict"
+    assert store.path.read_bytes() == before
+    for ambient_thread in ["", "thread-unrelated-fixture"]:
+        foreign_process = subprocess.run(
+            result.args,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+            env={**os.environ, "CODEX_THREAD_ID": ambient_thread},
+        )
+        assert foreign_process.returncode == 1
+        assert (
+            json.loads(foreign_process.stdout)["blocker"]
+            == "operation_handoff_conflict"
+        )
+        assert store.path.read_bytes() == before
 
 
 def _digest(value: object) -> str:

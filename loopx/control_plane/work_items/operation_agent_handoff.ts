@@ -36,6 +36,20 @@ export function normalizeAgentOperationExecutor(input: JsonObject): JsonObject {
     thread_id: id(executor.thread_id, "thread_id"), revision: AGENT_OPERATION_REVISION};
 }
 
+/** CLI selectors are not caller identity. The transport supplies the existing
+ * host's ambient thread in the trusted local OS-user boundary; hostile local
+ * processes/file writers require a separate authenticated host transport. */
+export function deriveAgentOperationActor(input: JsonObject): JsonObject {
+  const requested = requireJsonObject(input.requested, "requested actor");
+  const ambient = requireJsonObject(input.ambient, "ambient host context");
+  requireThat(typeof ambient.thread_id === "string" && ambient.thread_id.length > 0,
+    "original host session context is unavailable; route flags are not caller identity");
+  requireThat(requested.host_surface === ambient.host_surface && requested.thread_id === ambient.thread_id,
+    "requested route is not the current host session");
+  return {goal_id: id(requested.goal_id, "goal_id"), agent_id: id(requested.agent_id, "agent_id"),
+    host_surface: id(ambient.host_surface, "host_surface"), thread_id: id(ambient.thread_id, "thread_id")};
+}
+
 export function planAgentOperationHandoff(input: JsonObject): JsonObject {
   const proposal = requireJsonObject(input.proposal, "proposal");
   const parameters = requireJsonObject(proposal.normalized_parameters, "parameters");
@@ -70,7 +84,12 @@ export function planAgentOperationHandoff(input: JsonObject): JsonObject {
   const observed = operation.reconciliation ?? operation.outcome;
   const unknownResult = observed != null
     && requireJsonObject(observed, "observed result").outcome === "submission_unknown";
-  if (action === "project") {
+  if (action === "project" || action === "inspect") {
+    if (action === "inspect") {
+      const actor = requireJsonObject(input.actor, "inspection actor");
+      requireThat(Object.entries(route).every(([key, value]) => actor[key] === value),
+        "inspection actor is not the original bound session");
+    }
     return {...base, outcome_digest: digests.outcome_digest ?? null,
       status: unknownResult ? "submission_unknown"
       : operation.lifecycle_state === "outcome_observed" ? "outcome_observed"
@@ -136,8 +155,23 @@ export function projectAgentOperationInbox(input: JsonObject): JsonObject {
   const rank = (item: JsonObject) => item.needs_reconciliation === true ? 0 : 1;
   items.sort((a, b) => rank(a) - rank(b)
     || String(a.operation_id).localeCompare(String(b.operation_id), "en"));
-  return {items: items.slice(0, 20), pending_count: items.length,
-    overflow: items.length > 20 ? {reason: "attention_page_capacity", count: items.length - 20,
-      next_operation_id: items[20].operation_id,
-      instruction: "Inspect the next original operation by id; do not treat this page as the entire inbox."} : null};
+  const scope = requireNonEmptyString(input.cursor_scope, "operation cursor scope");
+  if (!/^[a-f0-9]{64}$/.test(scope)) throw new EffectRuntimeRequestError("operation cursor scope is invalid");
+  let remaining = items;
+  if (input.cursor != null) {
+    const cursor = requireNonEmptyString(input.cursor, "operation cursor");
+    const match = /^op1:([a-f0-9]{64}):([01]):([A-Za-z0-9._:-]{1,200})$/.exec(cursor);
+    if (!match || match[1] !== scope) throw new EffectRuntimeRequestError("operation cursor scope mismatch");
+    const afterRank = Number(match[2]);
+    remaining = items.filter(item => rank(item) > afterRank
+      || (rank(item) === afterRank && String(item.operation_id).localeCompare(match[3], "en") > 0));
+  }
+  const page = remaining.slice(0, 20);
+  const last = page.at(-1);
+  const next = remaining.length > 20 && last
+    ? `op1:${scope}:${rank(last)}:${id(last.operation_id, "operation_id")}` : null;
+  return {items: page, pending_count: items.length, next_cursor: next,
+    overflow: remaining.length > 20 ? {reason: "attention_page_capacity", count: remaining.length - 20,
+      next_operation_id: remaining[20].operation_id, next_cursor: next,
+      instruction: "Continue with manager-inbox read --operation-cursor. Restart without that cursor to discover new or changed work; a page boundary is not completion."} : null};
 }

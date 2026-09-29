@@ -703,7 +703,7 @@ const en = {
   "actionReview.apply_pending": "Execution is in progress. Wait for its result before retrying.",
   "actionReview.readback_verified": "The action completed and its resulting state was verified.",
   "actionReview.readback_unverified": "The action returned without verified readback. Completion is not confirmed; recheck the state.",
-  "actionReview.operation_reconcile_original": "Keep the original request. The original Agent must reconcile venue evidence; confirmation or expiry cannot grant another submission.",
+  "actionReview.operation_reconcile_original": "Keep the original request. The original Agent must reconcile original external evidence; confirmation or expiry cannot grant another submission.",
   "actionReview.operation_group_confirmation": "This exact request can only be confirmed on its original card in the bound Feishu group. The Dashboard does not expose a local execution control.",
   "actionReview.operation_result_delivery_pending": "The operation outcome was recorded, but the original group result card has not passed readback verification yet.",
   "drawer.recoverEditResult": "Recover operation result",

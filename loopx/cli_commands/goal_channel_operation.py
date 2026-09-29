@@ -14,6 +14,12 @@ from typing import Any, ClassVar, Self
 from ..chat_action_store import ActionConflictError, ChatActionStore
 from ..chat_actions import ChatActionService
 from ..control_plane.collaboration.operation_handoff import agent_operation_action
+from ..control_plane.effect_runtime import (
+    EffectRuntimeConflict,
+    EffectRuntimeRejected,
+    effect_runtime_result,
+)
+from ._host_thread import ambient_host_thread_id
 from ..extensions.lark.goal_channel import (
     default_goal_channel_target_path,
     deliver_goal_channel_operation_card,
@@ -253,6 +259,24 @@ def run_goal_channel_operation(
         if isinstance(request, _AgentOperation):
             # These commands use the original registry/store, not Lark target
             # settings or a new approval source. No external executor is called.
+            try:
+                actor = effect_runtime_result(
+                    "operation.agent_handoff.actor",
+                    {
+                        "requested": {
+                            "goal_id": request.goal_id,
+                            "agent_id": request.agent_id,
+                            "host_surface": request.host_surface,
+                            "thread_id": request.thread_id,
+                        },
+                        "ambient": {
+                            "host_surface": request.host_surface,
+                            "thread_id": ambient_host_thread_id(request.host_surface),
+                        },
+                    },
+                )
+            except (EffectRuntimeConflict, EffectRuntimeRejected) as exc:
+                raise ActionConflictError(str(exc)) from exc
             action = request.command.value.removesuffix("-operation")
             if not request.execute:
                 action = "inspect"
@@ -267,12 +291,7 @@ def run_goal_channel_operation(
                 context.source_runtime_root,
                 context.source_registry_path,
                 proposal_id=request.proposal_id,
-                actor={
-                    "goal_id": request.goal_id,
-                    "agent_id": request.agent_id,
-                    "host_surface": request.host_surface,
-                    "thread_id": request.thread_id,
-                },
+                actor=actor,
                 action=action,
                 consumption_id=request.consumption_id,
                 outcome=outcome,
@@ -282,6 +301,7 @@ def run_goal_channel_operation(
                 "goal_id": request.goal_id,
                 "execute": request.execute,
                 "operation": request.command.value.replace("-", "_"),
+                "caller_context_source": "trusted_local_host_environment",
                 **result,
             }
         target_path = _operation_target_path(request, context)
