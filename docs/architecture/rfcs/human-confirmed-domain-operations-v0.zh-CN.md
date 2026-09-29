@@ -260,15 +260,16 @@ M1 同时涵盖 UI 与后端，不要拆成“后端 PR 已完成”而遗忘前
   `manager-inbox read --operation-cursor CURSOR` 逐页找回其余操作，即使前 20 条未知
   结果长期未解决。游标绑定原 runtime/Goal/Agent 范围，与普通请求游标独立；新增或
   改变的工作应无游标重读，遍历结束不代表义务已解决。
-- Dashboard 详情与原 Lark 卡使用同一操作 frame：已确认待原 Agent、已消费待真实
+- Dashboard 详情与原 Lark 卡使用同一操作 frame：已确认但原宿主认证尚未接通、已消费待真实
   证据、未知须对账不得重提，以及独立核验的结果。Dashboard 对用户操作确认保持只读。
   不新增配置权威：执行器由原请求选择，原渠道/绑定 owner 仍是权威。
 
 ### 原运行时 CLI
 
 使用原 registry 和 runtime，不复制 session，也不借用另一个 home 的记录。
-以下本地续接命令不要求 Lark 已安装或可达；新卡片的准备/投递仍须通过原扩展与
-经认证入口的检查。
+以下选择器保留为续接接口；由于尚未接通合格的宿主身份签发端，**三个公开 CLI 命令
+目前均拒绝执行**。报告该门禁不要求 Lark 已安装或可达；新卡片准备/投递仍须通过原
+扩展与经认证入口的检查，但用户确认不能消除此宿主门禁。
 
 ```sh
 loopx --registry REGISTRY --runtime-root RUNTIME goal-channel inspect-operation \
@@ -283,15 +284,56 @@ loopx --registry REGISTRY --runtime-root RUNTIME goal-channel report-operation \
   --host-surface HOST --thread-id ORIGINAL_THREAD --outcome-json OUTCOME --execute
 ```
 
-`inspect-operation` 和没有 `--execute` 的命令均不消费授权。三个 CLI 命令均要求
-既有宿主导出的环境线程（例如 `CODEX_THREAD_ID`）匹配调用会话的路由；命令行标识只是选择器，
-不是调用者认证。环境缺失、不匹配或不支持的宿主在读取私有参数或写回之前即拒绝。
-返回的 `caller_context_source: trusted_local_host_environment` 只表示环境上下文检查，
-**不等于经认证的 session 隔离**。精确头复审已复现：同用户进程可自行设置该环境，
-消费原会话授权。“原会话专属执行”仍是未解决的验收阻塞；在独立验收受信宿主传输能
-证明调用者身份之前，不得安装此路径或宣称真实最小闭环。当前 registry 绑定只授权
-路由，不认证调用者。内部存储 adapter 是本地 IO 接缝，不是未认证的网络端点；下述
-历史对账恢复并不关闭这个独立的认证缺口。
+`inspect-operation` 和没有 `--execute` 的命令均不消费授权。旧环境线程检查
+（例如 `CODEX_THREAD_ID`）可被另一同用户进程伪造，现已移除，而非升级成认证：
+即使环境/路由完全匹配，仍在读取私有操作条款、结果文件或写回前返回
+`operation_host_authentication_unavailable`。旧运行时意外返回 actor 成功也不能
+绕过 CLI adapter 尚未接通的认证传输；没有 `--verified`、自行签发命令或环境令牌兜底。
+
+Inbox 继续展示有界定位信息，保留已消费/未知结果义务；它明确要求宿主接入，不再建议
+重试被阻断的 CLI 消费。Dashboard/Lark 共享 frame 明确说明用户确认已记录，但原
+宿主身份认证尚未接通。这项收紧消除了公开环境伪造路径，**并未交付经认证的正向执行
+路径**。“原会话专属执行”因此仍是验收阻塞。内部锁定存储 adapter 与合成夹具只验证
+协议语义，不证明宿主签发端或真实最小闭环。registry 绑定授权路由，不认证调用者。
+
+### 必需的宿主 adapter 接入
+
+选定边界是**由传输拥有、不可导出的操作工具**。宿主在原 session 的认证工具连接上
+处理 `loopx_operation`（`inspect`、`consume`、`report`），并把回执返回同一连接。
+这是必需的配套契约，不是已安装工具、已接受的 proof 字段或新的审批存储。
+
+1. 原配置 owner 在既有 session binding 上登记和撤销宿主签发者。请求不能自行选择
+   信任公钥或登记替代签发者；密钥轮换不改变不可变执行器，也不继承未消费授权。
+2. 宿主从原生工具分发元数据取得 session/Turn 身份，不使用工具参数、环境变量、
+   MCP 子进程自报或 Agent 可读的密钥文件。不向模型/CLI 暴露通用签名器或可复用
+   bearer token；私钥留在独立受信的宿主服务中，同用户环境伪造不得到达其身份或
+   签名权威。
+3. 跨进程时，签发者用 Ed25519 签署规范 invocation，绑定签发者/密钥 revision、
+   原 GoalRef/注册 Agent、host/session/Turn、原 operation 及载荷/确认摘要、
+   action/参数摘要、audience/runtime、认证连接、有界签发/到期时间及唯一 request ID。
+   Core 在 TypeScript 中核验 owner 固定的签发者、签名、精确范围、当前绑定与时效，
+   再调用既有锁定 IO 接缝。认证响应仅返回原宿主连接；向公开 CLI 转发签名载荷不能
+   获得执行许可。
+4. 认证只证明来源。原用户确认、不可变条款、有效 Goal、到期与原子一次消费仍是
+   独立门禁；重放或未知提交不允许第二次外部操作。恢复宿主也须使用自己的认证连接，
+   仅按既有接手恢复规则回写证据。
+
+**具体依赖：**外接 Codex Desktop session 需要 Desktop 原生工具服务在既有 app
+自有工具旁提供 session-bound 操作工具，并接入 owner 控制的签发者登记。该原生
+服务不在这个 LoopX checkout 内，现有 CLI/MCP adapter 也未实现它。宿主维护者
+须交付签发端；本 PR 不能用环境身份替代，也不能在另一进程悄悄恢复原 session。
+`CodexChatAgentSession._check_server_gate` 已核对 LoopX 自建 app-server 工具
+调用的 thread/Turn 元数据，但那是另一类自有 session，不证明外接 Desktop 线程。
+自有宿主接入须独立验收自己的路由，不能替代 Desktop 验收。
+
+真实签发端与 owner 固定的验签端应在同一后续切片接通，不交付无人使用的签名 API
+或夹具生成的凭据。验收须覆盖伪造环境/路由/proof 字段、外来 session、错误 audience、
+到期、篡改、重放、签发者/绑定撤销及原连接回执返回；启用宿主工具时保留当前公开 CLI
+拒绝回归。在同一边界通过真实原会话调用前不得安装本切片。工程 QA 不创建新 session、
+复制轨迹、制造群确认或触发真实金融副作用。
+
+### 宿主门禁后的单次消费与证据语义
+
 只有首次成功的原子消费
 返回 `execution_allowed: true`。它检查经认证的确认、不可变条款、原 session 当前绑定、
 有效 Goal 与到期时间，并在任何浏览器操作之前持久记录消费。所有重试，包括响应丢失
@@ -315,20 +357,20 @@ claim、执行器 revision、consumption ID，要求 `projection_verified: true`
 生命周期保护保持不变，不隐式迁入生命周期专用 registry 或另一个 home。
 原 Goal/Agent 注册缺失或 registry profile 不受支持均明确报错，不允许移植操作权限。
 
-原路由撤销后，**同 Goal、同 Agent、当前已注册并绑定的接手会话**可以用自己的调用
-路由执行 `inspect-operation` 与 `report-operation`。它只能检查已消费操作，回写
+原路由撤销后，**同 Goal、同 Agent、当前已注册并绑定的接手会话**在认证传输验收后
+可以用自己的宿主路由检查与回写。内部 IO 接缝只能检查已消费操作，回写
 原系统的历史证据，不能消费未使用的票据、改写原执行器或取得第二次执行许可。原绑定
-仍有效、接手会话未绑定、Goal/Agent 不同均拒绝恢复准入。CLI 明确返回 `access.owner`、
+仍有效、接手会话未绑定、Goal/Agent 不同均拒绝恢复准入。协议明确返回 `access.owner`、
 `original_route`、`permission: "historical_evidence_only"` 与绑定权威，不要求接手者
 冒充旧线程。原执行路由保持不可变；从接手绑定核对到结果提交共用 registry 锁，先提交
 的撤销拒绝回写。
 
 结果证据本身保持原样。规范操作单独追加 `outcome_report` 或 `reconciliation_report`
 来源，记录实际报告者、原路由、仅历史证据权限、权威来源、consumption ID 与记录时间。
-相同结果重试保留首次已提交来源，不重标作者或授予执行。CLI 检查同时返回原未知
+相同结果重试保留首次已提交来源，不重标作者或授予执行。内部检查同时返回原未知
 outcome 与不可变对账/来源；既有 Dashboard 共享 frame 与原 Lark 卡恢复消费同一
-规范结果，不另建恢复审批存储或执行控件。这些合成 CLI/原卡读回只验收历史对账恢复，
-不代替受信宿主认证或真实群验收。
+规范结果，不另建恢复审批存储或执行控件。因公开宿主门禁关闭，旧正向 CLI 夹具已改为
+内部 IO/原卡读回检查；它们只证明历史对账语义，不代替受信宿主认证或真实群验收。
 
 未知的原始 outcome 不可修改。确定性回写追加 `operation.reconciliation`，并通过
 `reconciles_outcome_digest` 绑定原未知结果的精确摘要；只有该证据才关闭恢复义务。

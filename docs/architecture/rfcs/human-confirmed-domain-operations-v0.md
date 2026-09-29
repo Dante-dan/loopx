@@ -329,7 +329,7 @@ choose a venue, resume a browser, sign or submit an order.
   runtime/Goal/Agent scope, not the ordinary request cursor. Restart without it
   for new/changed work; finishing a page sequence does not resolve obligations.
 - Dashboard details and the original Lark card use the shared operation frame:
-  confirmed/waiting for the original Agent; consumed/waiting for real evidence;
+  confirmed/original-host authentication unavailable; consumed/waiting for real evidence;
   unknown/reconcile without resubmitting; and a separately verified result.
   The Dashboard remains read-only for human operation confirmation. There is
   no new configuration owner: the original request chooses the executor and
@@ -338,9 +338,11 @@ choose a venue, resume a browser, sign or submit an order.
 ### Original-runtime CLI
 
 Use the original registry and runtime, not a copied session or another home's
-records. These local continuation commands do not require Lark to be installed
-or reachable. Preparing/delivering new cards remains subject to its normal
-extension and authenticated-ingress checks.
+records. The following selectors are reserved for the continuation interface;
+**all three public CLI commands currently fail closed** because no qualified
+host identity producer is connected. They do not require Lark to report that
+gate. Preparing/delivering new cards retains its normal extension and
+authenticated-ingress checks, but a confirmation cannot remove this host gate.
 
 ```sh
 loopx --registry REGISTRY --runtime-root RUNTIME goal-channel inspect-operation \
@@ -356,20 +358,80 @@ loopx --registry REGISTRY --runtime-root RUNTIME goal-channel report-operation \
 ```
 
 `inspect-operation` and a command without `--execute` never consume authority.
-All three CLI commands require the existing host-exported ambient thread
-(for example, `CODEX_THREAD_ID`) to match the caller's route; CLI identifiers
-are selectors, not caller authentication. Missing, foreign or unsupported host
-context fails closed before inspecting private parameters or writing a receipt.
-The returned `caller_context_source: trusted_local_host_environment` names an
-ambient-context check, **not authenticated session isolation**. Exact-head review
-reproduced a same-user process forging this environment and consuming the
-original session's authorization. Original-session-exclusive execution is an
-unresolved acceptance blocker: this path must not be installed or declared a
-live minimum loop until an independently qualified trusted-host transport
-proves caller identity. A current registry binding authorizes a route, but does
-not authenticate its caller. Internal storage adapters are local IO seams, not
-unauthenticated network endpoints; historical recovery below does not close
-this separate authentication gap.
+The former ambient-thread check (for example, `CODEX_THREAD_ID`) was forgeable
+by another same-user process. It is removed, not upgraded to authentication:
+even an exact environment/route match returns
+`operation_host_authentication_unavailable` before reading private operation
+terms, outcome files or writing receipts. Unexpected actor success from an
+older runtime also cannot bypass the CLI adapter's absent transport. There is
+no `--verified`, self-signing command or environment-token fallback.
+
+The Inbox still exposes bounded locators and preserves consumed/unknown
+obligations. It explicitly requests host integration instead of recommending
+another blocked CLI consumption. The shared Dashboard/Lark frame says human
+confirmation is recorded but original-host authentication is unavailable.
+This containment removes the public environment-forgery path; **it does not
+deliver an authenticated positive execution path**. Original-session-exclusive
+execution therefore remains an acceptance blocker. Internal locked storage
+adapters and their synthetic fixtures validate protocol semantics only, not a
+host producer or a live minimum loop. A registry binding authorizes a route,
+but does not authenticate its caller.
+
+### Required host-adapter integration
+
+The chosen boundary is a **transport-owned, non-exporting operation tool**.
+The host handles `loopx_operation` (`inspect`, `consume`, `report`) on the
+original session's authenticated tool connection and returns the receipt to
+that same connection. This is a required companion contract, not an installed
+tool, accepted proof field or a new approval store.
+
+1. The original configuration owner enrolls and revokes the host issuer against
+   the existing session binding. A request cannot select its own trust key or
+   enroll a replacement issuer. Issuer rotation does not change the immutable
+   operation executor or inherit unused approvals.
+2. The host derives session/Turn identity from its native tool-dispatch
+   metadata, not tool arguments, environment variables, an MCP subprocess's
+   self-report or an agent-readable key file. It does not expose a general
+   signer or a reusable bearer token to the model/CLI. Private signing material
+   remains within a separately trusted host service; same-user environment
+   spoofing must not reach that service's identity or signing authority.
+3. Across a process boundary, the issuer signs the canonical invocation with
+   Ed25519. The invocation binds issuer/key revision, original GoalRef and
+   registered Agent, host/session/Turn, original operation and its payload/
+   confirmation digests, action and action-argument digest, audience/runtime,
+   authenticated connection, bounded issue/expiry times and a unique request
+   ID. Core verifies the owner-pinned issuer, signature, exact scope, current
+   binding and freshness in TypeScript before the existing locked IO seam.
+   The authenticated response stays on the original host connection; forwarding
+   a signed payload to a public CLI must not reveal an execution permission.
+4. Authentication proves origin only. Original human confirmation, immutable
+   terms, active Goal, expiry and one-shot atomic consumption remain separate
+   gates. Request replay and unknown submission never authorize a second
+   external effect. A recovery host needs its own authenticated connection;
+   it may report evidence only under the existing replacement-recovery rules.
+
+**Concrete dependency:** attached Codex Desktop sessions need a session-bound
+operation tool in the Desktop's native tool server, alongside its existing
+app-owned tools, plus owner-controlled issuer enrollment. That native server
+is not implemented in this LoopX checkout or by its CLI/MCP adapters. The host
+maintainer must deliver the producer; this PR cannot substitute environment
+identity or silently resume the session in a different process.
+`CodexChatAgentSession._check_server_gate` already validates thread/Turn
+metadata on LoopX-owned app-server tool calls, but those are different owned
+sessions, not proof for an attached Desktop thread. An owned-host integration
+must be qualified for its own route and cannot stand in for Desktop acceptance.
+
+Integrate the real producer and owner-pinned verifier as one follow-up slice;
+do not ship an unused signing API or fixture-generated credentials. Qualify
+forged environment/route/proof fields, foreign sessions, wrong audience, expiry,
+tampering, replay, issuer/binding revocation and original-connection receipt
+return. Retain the current public-CLI rejection regression when enabling the
+host tool. A real original-session invocation must pass through the same
+boundary before the slice can be installed. No new session, copied trajectory,
+synthetic group click or real financial side effect is part of engineering QA.
+
+### One-shot and evidence semantics behind the host gate
+
 Only the first successful atomic consumption returns `execution_allowed: true`.
 It verifies authenticated confirmation, immutable terms, the current original
 session, active Goal and expiry, then persists consumption before any browser
@@ -402,13 +464,14 @@ original Goal/Agent registration or an unsupported registry profile is an
 explicit error, not permission to transplant the operation.
 
 After the original route is withdrawn, a **currently registered and bound
-replacement session of the same Goal and Agent** may use its own caller route
-with `inspect-operation` and `report-operation`. It may inspect only an already
+replacement session of the same Goal and Agent** may use its own authenticated
+host route for inspection and reporting once that transport is qualified. The
+internal IO seam may inspect only an already
 consumed operation and report original-system historical evidence. It cannot
 consume an unspent ticket, change the original executor or obtain a second
 execution permission. Recovery is not admitted while the original binding is
 still current, for an unbound replacement or for a different Goal/Agent. The
-CLI returns an explicit `access.owner`, `original_route`,
+protocol returns an explicit `access.owner`, `original_route`,
 `permission: "historical_evidence_only"` and binding authority; it never asks the
 replacement to impersonate the old thread. The original executor route remains
 immutable. The same registry lock is held from recovery-binding validation
@@ -418,12 +481,13 @@ Result evidence remains unchanged. The canonical operation separately appends
 `outcome_report` or `reconciliation_report` provenance with the actual reporter,
 original route, evidence-only permission, authority source, consumption ID and
 recorded time. Identical result retries preserve the first committed provenance;
-they do not relabel its author or grant execution. CLI inspection exposes both
+they do not relabel its author or grant execution. Internal inspection exposes both
 the original unknown outcome and its immutable reconciliation/provenance. The
 existing shared Dashboard frame and original Lark-card recovery consume the
 same canonical result; neither gets a separate recovery approval store or an
-execution control. These synthetic CLI/result-card checks are historical
-recovery acceptance, not trusted-host authentication or live-group acceptance.
+execution control. The prior positive CLI fixtures are now internal-IO/result-card
+checks because the public host gate is closed. They establish historical
+recovery semantics, not trusted-host authentication or live-group acceptance.
 
 An unknown original outcome is immutable. A definitive report appends
 `operation.reconciliation` and binds `reconciles_outcome_digest` to the exact
