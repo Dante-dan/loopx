@@ -7,20 +7,20 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
-import test_chat_operation_actions as fixtures  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import operation_action_fixtures as fixtures  # noqa: E402
 
 
 def main() -> None:
-    fixtures.GOAL_ID = "product-release"
+    goal_id = "product-release"
     with TemporaryDirectory(prefix="loopx-operation-ui-") as root:
-        service, store = fixtures._service(Path(root))
-        handler = fixtures._managed_handler(service, store)
+        service, store = fixtures.service(Path(root), goal_id=goal_id)
+        handler = fixtures.managed_handler(service, store, goal_id=goal_id)
         native = {
             "thread_id": "owned-managed-thread",
             "host_turn_id": "fixture-native-turn",
         }
-        request = fixtures._request()
+        request = fixtures.request(goal_id=goal_id)
         terms = request["normalized_parameters"]
         terms.pop("executor")
         terms["projection"].update(
@@ -33,12 +33,12 @@ def main() -> None:
             "loopx_operation", {"action": "prepare", "request": request}, native
         )["proposal"]
         delivered = store.record_operation_delivery(
-            proposal["proposal_id"], delivery=fixtures._delivery(proposal)
+            proposal["proposal_id"], delivery=fixtures.delivery(proposal)
         )
         confirmed = store.decide_operation(
             proposal["proposal_id"],
             decision="confirm",
-            confirmation=fixtures._confirmation(delivered),
+            confirmation=fixtures.confirmation(delivered),
         )
         consumed = handler(
             "loopx_operation",
@@ -51,7 +51,7 @@ def main() -> None:
         )
         assert consumed["execution_allowed"] is True
         waiting = store.load(proposal["proposal_id"])
-        unknown = fixtures._agent_result(
+        unknown = fixtures.agent_result(
             confirmed, "fixture-attempt", result="submission_unknown"
         )
         reported = handler(

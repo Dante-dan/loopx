@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import hashlib
 import json
+import os
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -13,10 +15,18 @@ from loopx.chat_actions import ChatActionService, ProtectedActionGate
 from loopx.control_plane.collaboration.operation_handoff import agent_operation_action
 from loopx.control_plane.collaboration.inbox import pending
 from loopx.capabilities.manager_context import turn_start_hook
+from examples.operation_action_fixtures import (
+    GOAL_ID,
+    agent_result as _agent_result,
+    confirmation as _confirmation,
+    delivery as _delivery,
+    digest as _digest,
+    managed_handler as _managed_handler,
+    request as _request,
+    service as _service,
+)
 
 
-GOAL_ID = "goal-operation-fixture"
-OPERATOR_ID = "ou_authorized_fixture"
 EXECUTION_ACTOR = {
     "goal_id": GOAL_ID,
     "agent_id": "finance-fixture-agent",
@@ -68,43 +78,45 @@ def _claim_agent_operation(
     )
 
 
-def _managed_handler(
-    service: ChatActionService,
-    store: ChatActionStore,
-    *,
-    session_id="owned-managed-thread",
-    profile_digest="c" * 64,
-    todo_id="todo-managed",
-    model="test-model",
-    reasoning_effort="xhigh",
-):
-    from loopx.control_plane.turn_driver.codex_cli import _store_codex_cli_session
-    from loopx.control_plane.turn_driver.codex_operation_host import (
-        operation_tool_handler,
+def test_browser_operation_fixture_needs_no_test_framework(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[1]
+    script = (
+        repo / "examples/personal-workspace-browser/confirmed-operation-fixtures.py"
     )
-
-    lineage = {
-        "goal_id": GOAL_ID,
-        "agent_id": "finance-fixture-agent",
-        "todo_id": todo_id,
-    }
-    runtime = store.root.parent.parent
-    _store_codex_cli_session(
-        runtime,
-        lineage=lineage,
-        session_id=session_id,
-        operation_profile_digest=profile_digest,
-        operation_model=model,
-        operation_reasoning_effort=reasoning_effort,
+    isolated = tmp_path / "effect-server"
+    isolated.mkdir()
+    # -S excludes site packages (including pytest); LoopX itself has no Python
+    # runtime dependencies. The release rehearsal separately installs the wheel.
+    result = subprocess.run(
+        [sys.executable, "-S", str(script)],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(repo),
+            "TMPDIR": str(isolated),
+            "TEMP": str(isolated),
+            "TMP": str(isolated),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
     )
-    return operation_tool_handler(
-        runtime_root=runtime,
-        registry_path=service.registry_path,
-        lineage=lineage,
-        session_id=session_id,
-        profile_digest=profile_digest,
-        model=model,
-        reasoning_effort=reasoning_effort,
+    fixtures = json.loads(result.stdout)
+    assert list(fixtures) == ["confirmed", "waiting", "unknown", "reconciled"]
+    for proposal in fixtures.values():
+        assert proposal["normalized_parameters"]["goal_id"] == "product-release"
+        assert proposal["normalized_parameters"]["executor"]["kind"] == "managed_turn"
+    assert (
+        fixtures["unknown"]["operation"]["outcome"]["outcome"] == "submission_unknown"
+    )
+    assert (
+        fixtures["reconciled"]["operation"]["outcome"]
+        == fixtures["unknown"]["operation"]["outcome"]
+    )
+    assert (
+        fixtures["reconciled"]["operation"]["reconciliation"]["outcome"]
+        == "not_executed"
     )
 
 
@@ -186,7 +198,9 @@ def test_managed_pending_reuses_registered_agent_and_goal_instance_scope(
         proposal["proposal_id"], delivery=_delivery(proposal)
     )
     store.decide_operation(
-        proposal["proposal_id"], decision="confirm", confirmation=_confirmation(delivered)
+        proposal["proposal_id"],
+        decision="confirm",
+        confirmation=_confirmation(delivered),
     )
     consumed = handler(
         "loopx_operation",
@@ -331,8 +345,11 @@ def test_managed_replacement_has_evidence_only_access_and_never_inherits_executi
     def revoke():
         _discard_codex_cli_session(
             store.root.parent.parent,
-            lineage={"goal_id": GOAL_ID, "agent_id": "finance-fixture-agent",
-                     "todo_id": "todo-recovery"},
+            lineage={
+                "goal_id": GOAL_ID,
+                "agent_id": "finance-fixture-agent",
+                "todo_id": "todo-recovery",
+            },
         )
         commits.append("revocation")
 
@@ -342,7 +359,9 @@ def test_managed_replacement_has_evidence_only_access_and_never_inherits_executi
 
     monkeypatch.setattr(codex_cli, "exclusive_file_lock", observed_lock)
     monkeypatch.setattr(ChatActionStore, "_write", record_report)
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="managed-revoker") as executor:
+    with ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="managed-revoker"
+    ) as executor:
         futures = []
 
         def interleaved_binding(registry_path, parameters, runtime_root):
@@ -350,15 +369,24 @@ def test_managed_replacement_has_evidence_only_access_and_never_inherits_executi
             if parameters["executor"].get("todo_id") == "todo-recovery":
                 futures.append(executor.submit(revoke))
                 assert attempted.wait(5)
-                assert not acquired.wait(0.2), "replacement revocation must wait for report commit"
+                assert not acquired.wait(0.2), (
+                    "replacement revocation must wait for report commit"
+                )
             return current
 
         monkeypatch.setattr(operation_handoff, "_binding", interleaved_binding)
-        assert replacement(
-            "loopx_operation",
-            {"action": "report", "proposal_id": proposal["proposal_id"], "outcome": final},
-            replacement_native,
-        )["ok"] is True
+        assert (
+            replacement(
+                "loopx_operation",
+                {
+                    "action": "report",
+                    "proposal_id": proposal["proposal_id"],
+                    "outcome": final,
+                },
+                replacement_native,
+            )["ok"]
+            is True
+        )
         futures[0].result(timeout=5)
     assert commits == ["report", "revocation"]
     monkeypatch.setattr(operation_handoff, "_binding", original_binding)
@@ -438,28 +466,6 @@ def test_managed_tool_rejects_actor_injection_native_mismatch_and_revoked_profil
         is False
     )
     assert store.load(proposal["proposal_id"])["operation"].get("agent_handoff") is None
-
-
-def _agent_result(
-    proposal: dict, consumption_id: str, *, result: str = "executed"
-) -> dict:
-    operation = proposal["operation"]
-    return {
-        "schema_version": "loopx_operation_outcome_v0",
-        "operation_id": proposal["proposal_id"],
-        "payload_digest": operation["payload_digest"],
-        "confirmation_digest": operation["confirmation_digest"],
-        "claim_id": operation["claim"]["claim_id"],
-        "executor_revision": operation["executor_revision"],
-        "consumption_id": consumption_id,
-        "outcome": result,
-        "projection_verified": True,
-        "simulation": False,
-        "external_write_performed": result != "not_executed",
-        "evidence_refs": ["receipt:synthetic-fixture-1"],
-        "summary": "Synthetic recorded execution evidence.",
-        "observed_at": datetime.now(timezone.utc).isoformat(),
-    }
 
 
 @pytest.mark.parametrize(
@@ -1196,130 +1202,6 @@ def test_inbox_uses_shared_recovery_priority_and_explicit_overflow(
         pending(
             store.root.parent.parent, GOAL_ID, "other-agent", operation_cursor=cursor
         )
-
-
-def _digest(value: object) -> str:
-    encoded = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _service(tmp_path: Path) -> tuple[ChatActionService, ChatActionStore]:
-    project = tmp_path / "project"
-    project.mkdir()
-    (project / "ACTIVE_GOAL_STATE.md").write_text(
-        f"---\ngoal_id: {GOAL_ID}\n---\n\n## User Todo\n\n## Agent Todo\n",
-        encoding="utf-8",
-    )
-    registry = project / ".loopx" / "registry.json"
-    registry.parent.mkdir()
-    registry.write_text(
-        json.dumps(
-            {
-                "goals": [
-                    {
-                        "id": GOAL_ID,
-                        "repo": str(project),
-                        "state_file": "ACTIVE_GOAL_STATE.md",
-                        "coordination": {
-                            "registered_agents": ["finance-fixture-agent"]
-                        },
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    store = ChatActionStore(tmp_path / "runtime" / "chat" / "actions")
-    return ChatActionService(store=store, registry_path=registry), store
-
-
-def _request(*, payload: dict[str, object] | None = None) -> dict[str, object]:
-    operation_payload = payload or {
-        "schema_version": "finance_order_intent_v0",
-        "side": "buy",
-        "asset": "SYNTH",
-        "quantity": "1.00",
-        "order_type": "limit",
-        "limit_price": "10.00",
-        "time_in_force": "GTC",
-        "reduce_only": False,
-    }
-    return {
-        "action_kind": "operation.execute",
-        "summary": "Confirm one simulated finance order",
-        "idempotency_key": "operation-fixture-v1",
-        "context": {"kind": "goal", "goal_id": GOAL_ID},
-        "normalized_parameters": {
-            "schema_version": "loopx_operation_request_v0",
-            "goal_id": GOAL_ID,
-            "agent_id": "finance-fixture-agent",
-            "domain": "finance",
-            "operation_kind": "finance.order.simulate",
-            "operation_schema": "finance_order_intent_v0",
-            "payload_ref": "finance-order:synthetic-1",
-            "payload": operation_payload,
-            "payload_digest": _digest(operation_payload),
-            "projection": {
-                "schema_version": "loopx_operation_projection_v0",
-                "title": "Simulated trade request",
-                "subtitle": "Synthetic fixture · no venue call",
-                "focus": "BUY 1.00 SYNTH @ 10.00",
-                "fields": [
-                    {"label": "Order type", "value": "Limit · GTC"},
-                    {"label": "Maximum notional", "value": "10.00 TEST"},
-                ],
-                "warning": "Simulation only. This cannot submit, sign, or transfer.",
-                "simulated": True,
-            },
-            "destination_account_ref": "account:simulation",
-            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-            "authorized_principals": [f"lark:{OPERATOR_ID}"],
-            "executor": {
-                "extension_id": "loopx-finance-execution",
-                "protocol": "finance_operation_executor_v0",
-                "permission": "finance.operation.simulate",
-                "revision": "simulator-v0",
-            },
-        },
-    }
-
-
-def _delivery(proposal: dict[str, object]) -> dict[str, str]:
-    operation = proposal["operation"]
-    assert isinstance(operation, dict)
-    return {
-        "provider": "lark",
-        "message_id": "om_operation_fixture",
-        "chat_id": "oc_operation_fixture",
-        "app_id": "cli_operation_fixture",
-        "binding_digest": "a" * 64,
-        "card_digest": "b" * 64,
-        "delivered_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def _confirmation(
-    proposal: dict[str, object], *, event_id: str = "evt-operation-1"
-) -> dict[str, str]:
-    operation = proposal["operation"]
-    assert isinstance(operation, dict)
-    delivery = operation["delivery"]
-    assert isinstance(delivery, dict)
-    return {
-        "provider": "lark",
-        "event_id": event_id,
-        "principal": f"lark:{OPERATOR_ID}",
-        "message_id": str(delivery["message_id"]),
-        "chat_id": str(delivery["chat_id"]),
-        "app_id": str(delivery["app_id"]),
-        "surface_kind": "group_message_card",
-        "interaction_kind": "button_callback",
-        "confirmation_digest": str(operation["confirmation_digest"]),
-        "card_digest": str(delivery["card_digest"]),
-        "confirmed_at": datetime.now(timezone.utc).isoformat(),
-    }
 
 
 def test_operation_preview_arms_one_canonical_gate_and_local_apply_cannot_claim(

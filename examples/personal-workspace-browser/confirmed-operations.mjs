@@ -8,9 +8,15 @@ import { openWorkspacePage } from "./scenario-context.mjs";
 export const confirmedOperationsScenario = {
   id: "confirmed-operations",
   async run({ browser, url }) {
+    const fixtureEnv = { ...process.env };
+    // An explicitly selected release interpreter must exercise its installed
+    // LoopX, not silently shadow the wheel with this source checkout.
+    if (!["LOOPX_TEST_PYTHON", "LOOPX_PYTHON_BIN", "LOOPX_PYTHON"].some(key => process.env[key])) {
+      fixtureEnv.PYTHONPATH = repoRoot;
+    }
     const fixtures = JSON.parse(execFileSync(resolveTestPython(), [
       resolve(repoRoot, "examples/personal-workspace-browser/confirmed-operation-fixtures.py"),
-    ], { cwd: repoRoot, env: { ...process.env, PYTHONPATH: repoRoot }, encoding: "utf8" }));
+    ], { cwd: repoRoot, env: fixtureEnv, encoding: "utf8" }));
     const states = {
       confirmed: { en: "Confirmed; waiting for the bound managed Turn", "zh-CN": "已确认，等待绑定的受管回合" },
       waiting: { en: "Authorization consumed; waiting for the real result", "zh-CN": "授权已消费，等待真实结果" },

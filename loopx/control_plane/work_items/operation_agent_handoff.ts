@@ -2,13 +2,13 @@
  * second approval store. Python supplies locked storage and registry facts;
  * this owner decides admission, one-shot consumption and result binding. */
 import type {JsonObject} from "../effect_program.ts";
+import {BARE_SHA256_PATTERN} from "../content_digest.ts";
 import {EffectRuntimeConflictError, EffectRuntimeRequestError} from "../effect_runtime_errors.ts";
 import {requireJsonObject, requireNonEmptyString} from "../runtime_decode.ts";
 
 export const AGENT_OPERATION_REVISION = "agent-session-handoff-v0";
 export const MANAGED_OPERATION_REVISION = "managed-turn-handoff-v0";
 const ID = /^[A-Za-z0-9._:-]{1,200}$/;
-const SHA256 = /^[a-f0-9]{64}$/;
 
 function id(value: unknown, field: string): string {
   const result = requireNonEmptyString(value, field);
@@ -48,7 +48,7 @@ export function normalizeAgentOperationExecutor(input: JsonObject): JsonObject {
     const keys = ["kind", "todo_id", "session_id", "profile_digest", "model", "reasoning_effort", "revision"];
     if (Object.keys(executor).length !== keys.length || keys.some(key => !(key in executor))
       || executor.revision !== MANAGED_OPERATION_REVISION
-      || typeof executor.profile_digest !== "string" || !SHA256.test(executor.profile_digest)) {
+      || typeof executor.profile_digest !== "string" || !BARE_SHA256_PATTERN.test(executor.profile_digest)) {
       throw new EffectRuntimeRequestError("managed operation executor binding is invalid");
     }
     return {kind: "managed_turn", todo_id: id(executor.todo_id, "todo_id"),
@@ -231,7 +231,7 @@ export function projectAgentOperationInbox(input: JsonObject): JsonObject {
   items.sort((a, b) => rank(a) - rank(b)
     || String(a.operation_id).localeCompare(String(b.operation_id), "en"));
   const scope = requireNonEmptyString(input.cursor_scope, "operation cursor scope");
-  if (!/^[a-f0-9]{64}$/.test(scope)) throw new EffectRuntimeRequestError("operation cursor scope is invalid");
+  if (!BARE_SHA256_PATTERN.test(scope)) throw new EffectRuntimeRequestError("operation cursor scope is invalid");
   let remaining = items;
   if (input.cursor != null) {
     const cursor = requireNonEmptyString(input.cursor, "operation cursor");
