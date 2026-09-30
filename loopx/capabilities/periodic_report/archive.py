@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from ...control_plane.digest_envelope import enveloped_sha256
 from ...control_plane.content_digest import ENVELOPED_SHA256_PATTERN
 from .adapters import ARTIFACT_SCHEMA, DOCUMENT_SCHEMA
 from .core import _normalize_trigger_receipt, _reject_raw_keys
@@ -83,7 +84,7 @@ def _canonical_json(value: object) -> str:
 
 
 def _content_digest(content: str) -> str:
-    return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+    return enveloped_sha256(content.encode('utf-8'))
 
 
 def _resource_root(value: object) -> str:

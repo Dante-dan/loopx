@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import heapq
 import json
 from collections.abc import Mapping, Sequence
@@ -10,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ...control_plane.digest_envelope import enveloped_sha256
 from ...registry import atomic_write_json, read_json
 from .incremental import read_periodic_report_publication_cursor
 from .incremental import normalize_periodic_report_publication_cursor
@@ -33,7 +33,7 @@ def _canonical_digest(value: object) -> str:
     encoded = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return enveloped_sha256(encoded)
 
 
 def _text(value: object, label: str, *, maximum: int) -> str:

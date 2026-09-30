@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -9,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .cadence import normalize_report_cadence
 
+from ...control_plane.digest_envelope import enveloped_sha256
 from ...control_plane.content_digest import ENVELOPED_SHA256_PATTERN
 from ...control_plane.todos.contract import normalize_todo_claimed_by
 from ..configuration_ui import resolve_capability_configuration
@@ -91,7 +91,7 @@ def _digest(value: object) -> str:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return enveloped_sha256(encoded)
 
 
 def normalize_periodic_report_machine_defaults(

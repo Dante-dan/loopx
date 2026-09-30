@@ -1,6 +1,6 @@
 """One owner decides what a stored SHA-256 looks like, and this keeps it that way.
 
-Four layers, and none of them substitutes for another:
+Five layers, and none of them substitutes for another:
 
 1. a **stated-shape scan**: no module outside the owner may state either whole-value
    shape, judged by the value a piece of source denotes;
@@ -9,7 +9,8 @@ Four layers, and none of them substitutes for another:
 3. a **readability rule**: a module that asks the owner may not also hand `re` a pattern
    this file cannot read, because that is where a shape could hide;
 4. **behavioural cases** that enter through each surface's own reader, the only layer that
-   can notice a surface wired to the wrong envelope.
+   can notice a surface wired to the wrong envelope;
+5. a **writer scan**: prefix construction outside the writer is explicitly deferred.
 
 Layer 1 judges values rather than spellings because the first two rounds of this pull
 request, and of its TypeScript twin, each found a spelling a spelling rule had to miss: an
@@ -26,8 +27,8 @@ scan can see. Both are recorded as follow-up work here, not reported as forbidde
 
 Only whole-value shapes are owned. A hex digest inside a larger grammar (a `cadence_...`
 identifier, a journal filename, a `40|64` Git object id, a compound cursor) answers that
-grammar's question and stays with the surface that owns it, and producers that concatenate
-`"sha256:"` by hand are the other half of the decision and are deliberately unchanged.
+grammar's question and stays with the surface that owns it, and the hand-written `digest_envelope` sibling now owns production. Remaining Python
+writers are pinned below; TypeScript writers remain outside this Python migration.
 """
 
 from __future__ import annotations
@@ -180,6 +181,7 @@ CONSUMER_MODULES = (
     "loopx.control_plane.collaboration.peers",
     "loopx.control_plane.coordination.local_authority_shadow_outbox",
     "loopx.control_plane.coordination.shadow_management",
+    "loopx.control_plane.digest_envelope",
     "loopx.control_plane.effect_runtime",
     "loopx.control_plane.goals.activation_service",
     "loopx.control_plane.goals.deletion_service",
@@ -475,7 +477,7 @@ def _scope_of(node: ast.AST, fallback: _Scope) -> _Scope:
     return getattr(node, _SCOPE_ATTRIBUTE, fallback)
 
 
-def _fold_text(node: ast.expr | None, scope: _Scope, depth: int = 0) -> str | None:
+def _fold_text(node: ast.expr | None, scope: _Scope, depth: int = 0, seen: frozenset[int] = frozenset()) -> str | None:
     """The text an expression denotes, or None when it does not denote exactly one.
 
     Reads through `+` concatenation, same-file constant bindings, single-element lists and
@@ -484,8 +486,9 @@ def _fold_text(node: ast.expr | None, scope: _Scope, depth: int = 0) -> str | No
     "unknown", which is a different claim from "not a digest shape".
     """
 
-    if node is None or depth > MAX_FOLD_DEPTH:
+    if node is None or depth > MAX_FOLD_DEPTH or id(node) in seen:
         return None
+    seen = seen | {id(node)}
     if isinstance(node, ast.Constant):
         if isinstance(node.value, str):
             return node.value
@@ -496,8 +499,8 @@ def _fold_text(node: ast.expr | None, scope: _Scope, depth: int = 0) -> str | No
                 return None
         return None
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _fold_text(node.left, scope, depth + 1)
-        right = _fold_text(node.right, scope, depth + 1)
+        left = _fold_text(node.left, scope, depth + 1, seen)
+        right = _fold_text(node.right, scope, depth + 1, seen)
         return left + right if left is not None and right is not None else None
     if isinstance(node, ast.JoinedStr):
         parts: list[str] = []
@@ -508,14 +511,14 @@ def _fold_text(node: ast.expr | None, scope: _Scope, depth: int = 0) -> str | No
                 return None
         return "".join(parts)
     if isinstance(node, ast.List) and len(node.elts) == 1:
-        return _fold_text(node.elts[0], scope, depth + 1)
+        return _fold_text(node.elts[0], scope, depth + 1, seen)
     if isinstance(node, ast.Name):
         binding = scope.binding(node.id)
         if binding is None or not binding.foldable:
             return None
         # The initializer is read in the scope that declared it, not in the scope that is
         # asking, which is what keeps a nested local from answering for an outer name.
-        return _fold_text(binding.value, binding.scope, depth + 1)  # type: ignore[arg-type]
+        return _fold_text(binding.value, binding.scope, depth + 1, seen)  # type: ignore[arg-type]
     return None
 
 
@@ -711,6 +714,135 @@ def _owner_text_reads(tree: ast.AST) -> list[int]:
     return lines
 
 
+WRITER_MODULE = "loopx/control_plane/digest_envelope.py"
+
+# Existing writers outside the periodic-report slice stay deferred. Counts make both
+# additions and retired sites visible; this is not permission for new constructions.
+# The TypeScript writers remain outside this Python-only envelope owner and guard.
+DEFERRED_WRITER_SITES: dict[str, int] = {
+    "loopx/capabilities/agent_turn_recall/core.py": 1,
+    "loopx/capabilities/change_quality/shadow.py": 1,
+    "loopx/capabilities/content_ops/item_lifecycle.py": 1,
+    "loopx/capabilities/content_ops/social_browser_x.py": 1,
+    "loopx/capabilities/decision_context/providers.py": 1,
+    "loopx/capabilities/issue_fix/candidate_evidence.py": 1,
+    "loopx/capabilities/issue_fix/candidate_preflight.py": 1,
+    "loopx/capabilities/issue_fix/github_public.py": 1,
+    "loopx/capabilities/issue_fix/repository_commit_evidence.py": 1,
+    "loopx/capabilities/issue_fix/repository_memory_provider.py": 4,
+    "loopx/capabilities/issue_fix/reviewer_notification.py": 1,
+    "loopx/capabilities/machine_configuration/contract.py": 1,
+    "loopx/capabilities/manager_context/discovery.py": 1,
+    "loopx/capabilities/material_lifecycle/intake.py": 1,
+    "loopx/capabilities/material_lifecycle/readable_projection.py": 1,
+    "loopx/capabilities/periodic_report/pending_intent.py": 1,
+    "loopx/capabilities/periodic_report/post_writeback_hook.py": 3,
+    "loopx/capabilities/periodic_report/request_action.py": 1,
+    "loopx/capabilities/reward_memory/configuration.py": 1,
+    "loopx/capabilities/reward_memory/experience_quality.py": 1,
+    "loopx/capabilities/reward_memory/outbound.py": 1,
+    "loopx/capabilities/reward_memory/outcome_lifecycle.py": 1,
+    "loopx/chat_manager_context.py": 2,
+    "loopx/chat_manager_details.py": 1,
+    "loopx/chat_manager_history.py": 3,
+    "loopx/configuration_transaction.py": 1,
+    "loopx/control_plane/capability_hooks.py": 1,
+    "loopx/control_plane/chat_turn_acceptance.py": 1,
+    "loopx/control_plane/coordination/local_authority_shadow_outbox.py": 1,
+    "loopx/control_plane/coordination/local_authority_shadow_projection.py": 2,
+    "loopx/control_plane/coordination/runtime_shadow.py": 3,
+    "loopx/control_plane/coordination/shadow_management.py": 1,
+    "loopx/control_plane/goals/botmux_runtime.py": 1,
+    "loopx/control_plane/goals/shared_goal_alignment.py": 1,
+    "loopx/control_plane/goals/source_session_registry_state.py": 1,
+    "loopx/control_plane/operator_inbox_binding.py": 1,
+    "loopx/control_plane/operator_provider.py": 1,
+    "loopx/control_plane/projects/registry_codec.py": 1,
+    "loopx/control_plane/quota/blocked_transition_notice.py": 1,
+    "loopx/control_plane/quota/monitor_poll.py": 1,
+    "loopx/control_plane/quota/spend_commit.py": 1,
+    "loopx/control_plane/runtime/local_state_write_correctness.py": 1,
+    "loopx/control_plane/runtime/status_projection_cache.py": 1,
+    "loopx/control_plane/testing/actual_default_model_behavior_portfolio.py": 1,
+    "loopx/control_plane/testing/model_behavior_qualification.py": 1,
+    "loopx/control_plane/testing/model_behavior_retained_cases.py": 1,
+    "loopx/control_plane/testing/model_tool_behavior.py": 1,
+    "loopx/control_plane/testing/onboarding_model_behavior_qualification.py": 1,
+    "loopx/control_plane/turn_driver/command_validation.py": 1,
+    "loopx/control_plane/turn_driver/driver.py": 1,
+    "loopx/control_plane/turn_driver/host_candidate.py": 1,
+    "loopx/control_plane/turn_driver/journal_store.py": 2,
+    "loopx/control_plane/turn_driver/subagent_execution_topology.py": 1,
+    "loopx/control_plane/turn_driver/transaction.py": 1,
+    "loopx/control_plane/work_items/governed_transition_proposal.py": 1,
+    "loopx/extensions/capability_admission.py": 1,
+    "loopx/extensions/execution_envelope.py": 1,
+    "loopx/extensions/external_connector_provider.py": 1,
+    "loopx/extensions/external_connector_runtime.py": 1,
+    "loopx/extensions/governed_capability_execution.py": 1,
+    "loopx/extensions/lark/document_comment_provider.py": 2,
+    "loopx/extensions/lark/goal_channel_contracts.py": 1,
+    "loopx/extensions/lark/goal_channel_delivery_contract.py": 1,
+    "loopx/extensions/lark/group_history.py": 1,
+    "loopx/extensions/lark/group_history_cursor.py": 1,
+    "loopx/extensions/lark/inbox_reply.py": 2,
+    "loopx/extensions/lark/manager_reply_delivery.py": 2,
+    "loopx/extensions/lark/periodic_report_delivery.py": 1,
+    "loopx/extensions/lark/periodic_report_request.py": 1,
+    "loopx/extensions/lark/turn_start_sync.py": 1,
+    "loopx/extensions/manifest.py": 1,
+    "loopx/extensions/openviking_periodic_report/provider.py": 1,
+    "loopx/goal_portfolio.py": 2,
+    "loopx/history.py": 1,
+    "loopx/presentation/renderers/periodic_report_html.py": 2,
+    "loopx/presentation/renderers/periodic_report_markdown.py": 2,
+    "loopx/presentation/static_site.py": 1,
+}
+
+
+def _writer_template(
+    node: ast.expr | None,
+    scope: _Scope,
+    seen: frozenset[int] = frozenset(),
+) -> str:
+    """Fold known text with opaque substitutions, respecting lexical bindings.
+
+    Cyclic initializers are unreadable, not exponentially expanded. This inspects
+    construction, not consumption (startswith/removeprefix are not scanned).
+    """
+    if node is None or id(node) in seen or len(seen) > MAX_FOLD_DEPTH:
+        return "\0"
+    seen = seen | {id(node)}
+    scope = _scope_of(node, scope)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        binding = scope.binding(node.id)
+        if binding is not None and binding.foldable and binding.scope is not None:
+            return _writer_template(binding.value, binding.scope, seen)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _writer_template(node.left, scope, seen) + _writer_template(node.right, scope, seen)
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            _writer_template(value.value if isinstance(value, ast.FormattedValue) else value, scope, seen)
+            for value in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        template = _writer_template(node.left, scope, seen)
+        # Formatting preserves the literal envelope before the first conversion.
+        return template.split("%", 1)[0] + "\0"
+    return "\0"
+
+
+def _writer_constructions(tree: ast.AST, root: _Scope) -> list[int]:
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.JoinedStr, ast.BinOp))
+        and _writer_template(node, root).startswith(ENVELOPE)
+    ]
+
+
 def _analyse(source: str, name: str = "<module>") -> dict[str, Any]:
     tree = ast.parse(source, filename=name)
     root = _collect_scopes(tree)
@@ -721,6 +853,7 @@ def _analyse(source: str, name: str = "<module>") -> dict[str, Any]:
         "constructions": _regex_constructions(tree, root),
         "owner_imports": _owner_import_map(tree),
         "owner_text_reads": _owner_text_reads(tree),
+        "writers": _writer_constructions(tree, root),
         "loaded": _loaded_names(tree),
     }
 
@@ -1563,3 +1696,121 @@ def test_chat_bundle_source_digest_uses_the_owner_bare_shape() -> None:
     from loopx.presentation import chat_bundle
 
     assert chat_bundle.BARE_SHA256_PATTERN is BARE_SHA256_PATTERN
+
+
+# --- production envelope: the fifth layer -------------------------------------
+
+
+def test_only_the_writer_builds_new_envelopes() -> None:
+    observed = {
+        entry["relative"]: len(entry["writers"])
+        for entry in _repo_scan()
+        if entry["writers"] and entry["relative"] != WRITER_MODULE
+    }
+    assert observed == DEFERRED_WRITER_SITES, (
+        "A hand-built envelope was added or a deferred writer was retired; "
+        "delegate new writers to digest_envelope and review the deferred inventory."
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'value = "sha256:" + digest',
+        'value = f"sha256:{digest}"',
+        'value = "sha256:%s" % digest',
+        'PREFIX = "sha" + "256:"\nvalue = PREFIX + digest',
+        'PREFIX = "sha256:"\nvalue = f"{PREFIX}{digest}"',
+        'PREFIX = "sha256:%s"\nvalue = PREFIX % digest',
+        'PREFIX = "sha256:"\ndef writer(digest):\n return PREFIX + digest\ndef unrelated():\n PREFIX = "other:"',
+    ],
+)
+def test_writer_guard_rejects_a_non_owner_mutation(source: str) -> None:
+    assert _analyse(source)["writers"], "the hand-built prefix escaped layer five"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'value = digest.removeprefix("sha256:")',
+        'value = digest.startswith("sha256:")',
+        'value = f"record:sha256:{digest}"',
+        'value = "sha256:"',
+        'PREFIX = "sha256:"\ndef writer(PREFIX, digest):\n return PREFIX + digest',
+    ],
+)
+def test_writer_guard_does_not_claim_consumption_or_unreadable_prefixes(
+    source: str,
+) -> None:
+    assert not _analyse(source)["writers"]
+
+
+@pytest.mark.parametrize(
+    "data", [b"", b"report", "报告 café".encode(), bytes(range(256))]
+)
+def test_writer_is_byte_identical_to_the_previous_envelope(data: bytes) -> None:
+    import hashlib
+    from loopx.control_plane.digest_envelope import enveloped_sha256
+
+    assert enveloped_sha256(data) == "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def test_writer_checks_the_reader_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    from loopx.control_plane import digest_envelope
+
+    monkeypatch.setattr(
+        digest_envelope, "ENVELOPED_SHA256_PATTERN", re.compile("never")
+    )
+    with pytest.raises(ValueError, match="recognition contract"):
+        digest_envelope.enveloped_sha256(b"report")
+
+
+@pytest.mark.parametrize(
+    "module,helper,ascii_json",
+    [
+        ("cadence_journal", "_digest", False),
+        ("bindings", "_sha256", False),
+        ("audience", "_digest", False),
+        ("workspace", "_canonical_digest", False),
+        ("machine_defaults", "_digest", False),
+        ("incremental", "_canonical_digest", False),
+    ],
+)
+def test_migrated_json_writers_preserve_their_canonicalization(
+    module: str, helper: str, ascii_json: bool
+) -> None:
+    import hashlib
+
+    value = {
+        "report": "报告 café",
+        "rows": [1, None, False],
+        "nested": {"z": 1, "a": 2},
+    }
+    caller = importlib.import_module(f"loopx.capabilities.periodic_report.{module}")
+    encoded = json.dumps(
+        value, ensure_ascii=ascii_json, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    assert (
+        getattr(caller, helper)(value)
+        == "sha256:" + hashlib.sha256(encoded).hexdigest()
+    )
+
+
+def test_migrated_string_and_event_writers_preserve_bytes() -> None:
+    import hashlib
+    from loopx.capabilities.periodic_report import archive, runtime_producer
+
+    content = "报告 café\n"
+    assert (
+        archive._content_digest(content)
+        == "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+    )
+    event_ids = ["报告", "event-b", "event-a"]
+    # The producer sorts without deduplicating and retains ASCII JSON escaping.
+    encoded = json.dumps(
+        sorted(event_ids), ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+    assert (
+        runtime_producer._event_digest(event_ids)
+        == "sha256:" + hashlib.sha256(encoded).hexdigest()
+    )
