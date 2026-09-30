@@ -15,7 +15,7 @@
 
 第 1–11 节定义拟议契约，并非已发布的命令。第 12 节记录尚未解决的实现选择。
 本文不修改运行时、默认权限、配置或用户入口。
-第 13 节记录原 Agent 续接的实现切片；部署与真实验收独立于本地验证。
+第 13 节记录来源上下文/已准入执行者续接的实现切片；部署与真实验收独立于本地验证。
 
 ## 1. 决策摘要
 
@@ -234,152 +234,122 @@ M1 同时涵盖 UI 与后端，不要拆成“后端 PR 已完成”而遗忘前
 4. **部署资格：** 核实真实飞书应用回调和 Web owner 身份认证机制。
    事件进程健康本身不能证明任一用户路径可用。M1 验收前必须完成。
 
-## 13. 原 Agent 续接切片
+## 13. 用户确认后的 Agent 执行：来源与执行者分离
 
-已有用户授权的 Agent 若已掌握垂域浏览器或 adapter 工作流，不必仅为将精确确认
-回传给它而新增 API 凭据路径。这是另一种执行接缝，不放松上文的金融提交前检查、
-账户级约束或原始证据要求。Core 不解释价格、不选平台、不恢复浏览器、不签名、不下单。
+原对话提供上下文及结果返回的受众，不必同时成为执行进程。长期契约是
+**用户批准 → 受管执行准入 → 单次消费 → 原系统证据 → 核验回传**，不是“Desktop
+线程 ID 就是执行令牌”。已有垂域 Agent 可复用其已授权工作流，显式配置的 delegation
+也可由 LoopX 自有受管 Turn 执行；两条路径都不增加账户访问、交易或宽泛写权限。
 
-### 权威与用户入口
+### 单一权威与不可变执行主体
 
-- `chat/actions/actions.json` 中原始 `operation.execute` 提案仍是确认、claim、
-  消费及结果的唯一存储。
-- 显式执行器形状为 `{kind: "agent_session", host_surface, thread_id,
-  revision: "agent-session-handoff-v0"}`。准备时核对原 registry 中精确的
-  Goal/已注册 Agent/session 绑定，拒绝以模拟冒充真实执行。生命周期专用的
-  `source_session_v1` registry 目前拒绝业务操作准备；本切片不绕过该 owner，也不为
-  替换的 instance 开启业务权限。
-- `operation_agent_handoff.ts` 管理准入、一次消费、对账绑定及有界 Inbox 注意力。
-  Python 提供锁定的规范存储、原 registry 事实及现有生命周期保护，不另建决策源。
-- 复用现有 Lark prepare/deliver 与经认证的回调。确认成功后原提案保持 claimed，
-  没有外部结果。回调重放、模拟器、卡片投递恢复均不得调用该 Agent 的浏览器或 adapter。
-- 原 manager Inbox 直接从规范操作投影定位信息，不复制审批记录。Turn-start hook
-  将它计入 `agent_read_required`。已消费/未知结果义务先于未消费票据展示；每页 20 条
-  之外明确给出总数量、类型化 overflow 原因及下一条操作 ID，不静默丢弃工作；可按该
-  ID 直接检查原操作，并用独立的 `operation_handoff_next_cursor` 通过
-  `manager-inbox read --operation-cursor CURSOR` 逐页找回其余操作，即使前 20 条未知
-  结果长期未解决。游标绑定原 runtime/Goal/Agent 范围，与普通请求游标独立；新增或
-  改变的工作应无游标重读，遍历结束不代表义务已解决。
-- Dashboard 详情与原 Lark 卡使用同一操作 frame：已确认但原宿主认证尚未接通、已消费待真实
-  证据、未知须对账不得重提，以及独立核验的结果。Dashboard 对用户操作确认保持只读。
-  不新增配置权威：执行器由原请求选择，原渠道/绑定 owner 仍是权威。
+- `chat/actions/actions.json` 中原始 `operation.execute` 仍是确认、claim、
+  消费、结果和对账的唯一存储。
+- 原外接主体保持
+  `{kind: "agent_session", host_surface, thread_id, revision: "agent-session-handoff-v0"}`；
+  其公开 CLI 认证门禁仍关闭。
+- 新增显式 opt-in 主体为
+  `{kind: "managed_turn", todo_id, session_id, profile_digest, model, reasoning_effort, revision: "managed-turn-handoff-v0"}`。
+  它指向既有 Codex Turn session owner，不另建运行时目录。准备时核对已注册
+  Goal/Agent、精确 Todo/session、适用的 Goal instance、传输与固定 profile。
+- `source_route` 仅从既有登记对话绑定投影，可为空；它是不可变的上下文/返回信息，
+  不是调用者身份、执行许可或消息已送达证明。
+- TypeScript 管理执行器归一化、绑定判断、传输配置读回、单次准入、恢复和展示；
+  Python 只承载原生进程、session/存储锁及 Lark IO。不新增平行 Python 审批或通用决策源。
+- 旧外接批准不转换为受管批准。session、Todo、模型、思考深度、sandbox、workspace、
+  home、可执行文件或 invocation-scoped MCP 配置改变时，必须显式开启 fresh
+  iteration 并重新批准。不复制轨迹、SQLite 行或凭据。
 
-### 原运行时 CLI
+生命周期专用 `source_session_v1` registry 仍拒绝业务操作准备；本切片不启用替换
+Goal instance，不改变 provider 权威，也不把旧操作移植到另一运行时。
 
-使用原 registry 和 runtime，不复制 session，也不借用另一个 home 的记录。
-以下选择器保留为续接接口；由于尚未接通合格的宿主身份签发端，**三个公开 CLI 命令
-目前均拒绝执行**。报告该门禁不要求 Lark 已安装或可达；新卡片准备/投递仍须通过原
-扩展与经认证入口的检查，但用户确认不能消除此宿主门禁。
+### 既有 delegation 与 Turn 入口
 
-```sh
-loopx --registry REGISTRY --runtime-root RUNTIME goal-channel inspect-operation \
-  --goal-id GOAL --agent-id AGENT --proposal-id OPERATION \
-  --host-surface HOST --thread-id ORIGINAL_THREAD
-loopx --registry REGISTRY --runtime-root RUNTIME goal-channel consume-operation \
-  --goal-id GOAL --agent-id AGENT --proposal-id OPERATION \
-  --host-surface HOST --thread-id ORIGINAL_THREAD \
-  --consumption-id STABLE_ATTEMPT --execute
-loopx --registry REGISTRY --runtime-root RUNTIME goal-channel report-operation \
-  --goal-id GOAL --agent-id AGENT --proposal-id OPERATION \
-  --host-surface HOST --thread-id ORIGINAL_THREAD --outcome-json OUTCOME --execute
+启动许可仍归原 operator-owned delegation 配置。Codex binding 通过既有
+`host_args` 显式启用：
+
+```text
+--host codex-cli --codex-operation-tools
+--codex-model MODEL --codex-reasoning-effort EFFORT
+--codex-sandbox read-only
 ```
 
-`inspect-operation` 和没有 `--execute` 的命令均不消费授权。旧环境线程检查
-（例如 `CODEX_THREAD_ID`）可被另一同用户进程伪造，现已移除，而非升级成认证：
-即使环境/路由完全匹配，仍在读取私有操作条款、结果文件或写回前返回
-`operation_host_authentication_unavailable`。旧运行时意外返回 actor 成功也不能
-绕过 CLI adapter 尚未接通的认证传输；没有 `--verified`、自行签发命令或环境令牌兜底。
+相同选项可用于 `turn run-once`。复用既有 delegation inspect/preflight、start、
+准入、租约、session 续接、结果验证和验收。原 host owner 读回 profile；
+不新增前端配置存储或隐藏默认。不固定或不受支持的配置在预检中标为 unavailable；
+有效 argv 仍是 runtime-unverified，不能证明宿主或操作已运行。仅在现有工作授权
+确需时使用 `workspace-write`；此传输不接受 `danger-full-access`。
 
-Inbox 继续展示有界定位信息，保留已消费/未知结果义务；它明确要求宿主接入，不再建议
-重试被阻断的 CLI 消费。Dashboard/Lark 共享 frame 明确说明用户确认已记录，但原
-宿主身份认证尚未接通。这项收紧消除了公开环境伪造路径，**并未交付经认证的正向执行
-路径**。“原会话专属执行”因此仍是验收阻塞。内部锁定存储 adapter 与合成夹具只验证
-协议语义，不证明宿主签发端或真实最小闭环。registry 绑定授权路由，不认证调用者。
+已准入宿主复用 `CodexChatAgentSession` app-server adapter，将不透明线程保存于
+既有 Goal/Agent/Todo session owner，安装不可导出的 `loopx_operation` dynamic tool。
+自有 stdio 连接在分发前核对原生 thread 与活跃 Turn 元数据；工具参数不能传 actor、
+verified、信任密钥、签名或 bearer token。回执返回同一原生连接，不恢复或冒充
+登记的来源 Desktop 线程。
 
-### 必需的宿主 adapter 接入
+`context` 读回精确受管主体但不给执行许可；`prepare` 在规范 action store 预览
+不可变条款；`pending` 读取有界 Inbox；`inspect/consume/report` 复用锁定操作接缝。
+保留 invocation-scoped collaboration MCP 的普通委派能力，它不是操作身份签发端。
+宿主结果沿用 typed Turn result 及验证；最终答复文字不能冒充操作结果回执。
 
-选定边界是**由传输拥有、不可导出的操作工具**。宿主在原 session 的认证工具连接上
-处理 `loopx_operation`（`inspect`、`consume`、`report`），并把回执返回同一连接。
-这是必需的配套契约，不是已安装工具、已接受的 proof 字段或新的审批存储。
+首个传输是 Codex 专用 IO，不是 Codex 专用审批模型。其他受管宿主只有在原生身份
+来源、实际 profile 读回、撤销和响应路由通过验收后才能实现同一契约。外接 Desktop
+仍是独立可选 adapter，**不是受管路径的前置依赖**。未来远端边界可能需要 owner
+登记的认证 invocation 核验，但不应让无人消费的签名器或本地伪造凭据成为自有进程
+分发的前置条件。
 
-1. 原配置 owner 在既有 session binding 上登记和撤销宿主签发者。请求不能自行选择
-   信任公钥或登记替代签发者；密钥轮换不改变不可变执行器，也不继承未消费授权。
-2. 宿主从原生工具分发元数据取得 session/Turn 身份，不使用工具参数、环境变量、
-   MCP 子进程自报或 Agent 可读的密钥文件。不向模型/CLI 暴露通用签名器或可复用
-   bearer token；私钥留在独立受信的宿主服务中，同用户环境伪造不得到达其身份或
-   签名权威。
-3. 跨进程时，签发者用 Ed25519 签署规范 invocation，绑定签发者/密钥 revision、
-   原 GoalRef/注册 Agent、host/session/Turn、原 operation 及载荷/确认摘要、
-   action/参数摘要、audience/runtime、认证连接、有界签发/到期时间及唯一 request ID。
-   Core 在 TypeScript 中核验 owner 固定的签发者、签名、精确范围、当前绑定与时效，
-   再调用既有锁定 IO 接缝。认证响应仅返回原宿主连接；向公开 CLI 转发签名载荷不能
-   获得执行许可。
-4. 认证只证明来源。原用户确认、不可变条款、有效 Goal、到期与原子一次消费仍是
-   独立门禁；重放或未知提交不允许第二次外部操作。恢复宿主也须使用自己的认证连接，
-   仅按既有接手恢复规则回写证据。
+### 确认、单次消费与恢复
 
-**具体依赖：**外接 Codex Desktop session 需要 Desktop 原生工具服务在既有 app
-自有工具旁提供 session-bound 操作工具，并接入 owner 控制的签发者登记。该原生
-服务不在这个 LoopX checkout 内，现有 CLI/MCP adapter 也未实现它。宿主维护者
-须交付签发端；本 PR 不能用环境身份替代，也不能在另一进程悄悄恢复原 session。
-`CodexChatAgentSession._check_server_gate` 已核对 LoopX 自建 app-server 工具
-调用的 thread/Turn 元数据，但那是另一类自有 session，不证明外接 Desktop 线程。
-自有宿主接入须独立验收自己的路由，不能替代 Desktop 验收。
+既有经认证 Lark 回调记录精确用户确认并 claim 原提案，不启动浏览器或垂域 adapter。
+重放、模拟及卡片投递恢复都不产生垂域效果；Dashboard 对用户操作确认仍只读。
 
-真实签发端与 owner 固定的验签端应在同一后续切片接通，不交付无人使用的签名 API
-或夹具生成的凭据。验收须覆盖伪造环境/路由/proof 字段、外来 session、错误 audience、
-到期、篡改、重放、签发者/绑定撤销及原连接回执返回；启用宿主工具时保留当前公开 CLI
-拒绝回归。在同一边界通过真实原会话调用前不得安装本切片。工程 QA 不创建新 session、
-复制轨迹、制造群确认或触发真实金融副作用。
+只有首次成功原子消费返回 `execution_allowed: true`，核对经认证的确认、不可变
+条款、当前执行绑定、有效 Goal 和到期时间，在 Agent 垂域执行前持久记录消费。
+所有重试，包括丢失响应或重启后的同一 attempt，都不再授予执行。
+它约束的是**授权消费**，不宣称能禁止可信 Agent 的所有工具调用，也不承诺平台恰好执行一次。
 
-### 宿主门禁后的单次消费与证据语义
+锁序是 Goal 生命周期 → registry → 既有 Turn session（仅受管路径）→ action store。
+session 替换/丢弃与消费共用锁。先提交的撤销阻止消费，之后的撤销不能抹去已提交回执；
+外部执行期间不持锁。
 
-只有首次成功的原子消费
-返回 `execution_allowed: true`。它检查经认证的确认、不可变条款、原 session 当前绑定、
-有效 Goal 与到期时间，并在任何浏览器操作之前持久记录消费。所有重试，包括响应丢失
-或重启后使用同一 attempt，均不再获得执行许可。这不承诺平台恰好执行一次；存在歧义
-必须按原平台证据对账。
-绑定/注册/启用状态读取和消费提交共享既有 registry writer 锁，顺序为 Goal 生命周期
-→ registry → action store。先提交的撤销阻止消费；排在消费之后的撤销不能追溯抹除
-已提交的回执。锁在外部执行前释放，不宣称约束其后的外部操作。
+绑定宿主回写 `loopx_operation_outcome_v0`：精确 operation/载荷/确认摘要、claim、
+executor revision、consumption ID、核验投影、`simulation: false`、
+有界原系统证据引用及单独的 `external_write_performed`。结果为 `executed`、
+`not_executed` 或 `submission_unknown`；未知保守披露可能的外部副作用。
+原生传输成功不等于平台证据；Core 不解释价格、平台、费用、持仓或保护单。
 
-原 Agent 回写 `loopx_operation_outcome_v0`，绑定精确 operation、载荷与确认摘要、
-claim、执行器 revision、consumption ID，要求 `projection_verified: true`、
-`simulation: false`、有界原始证据引用，并单独声明 `external_write_performed`。
-结果为 `executed`、`not_executed` 或 `submission_unknown`。未知保守声明可能存在外部
-副作用；传输成功不能证明交易或保护单。引用应为安全的不透明回执标识，不能含凭据或
-私有绝对路径；垂域证据及私有交易日记保留详细材料。
+已消费/未知义务在到期或原绑定撤销后仍保留。同 Goal/Agent 当前接手者只有在原绑定
+撤销后才能检查/回写历史证据，不能消费未用票据或重写执行器。原 outcome 不可变，
+对账以 `reconciles_outcome_digest` 绑定并追加实际报告者/路由来源，读回保留原始与
+对账证据。已停止/历史 Goal 沿用证据专用生命周期保护，不因此获得新的执行许可。
 
-### 恢复、投递与剩余验收
+### 共享 Inbox、前端、Lark 与真实回传
 
-已消费或未知操作在到期或 session 重绑后仍是恢复义务；这些变化不能授予新执行。
-仅回写证据可通过既有生命周期保护继续用于已停止/历史 Goal。现有精确 instance
-生命周期保护保持不变，不隐式迁入生命周期专用 registry 或另一个 home。
-原 Goal/Agent 注册缺失或 registry profile 不受支持均明确报错，不允许移植操作权限。
+既有 Inbox 直接投影规范定位信息：恢复优先、每页 20 条、总数/类型化 overflow
+及独立 operation cursor。`loopx_operation pending` 接受绑定游标；CLI 投影用
+`manager-inbox read --operation-cursor CURSOR`。新增/改变工作应无游标重读，
+读完一页或遍历结束不代表义务已解决。
 
-原路由撤销后，**同 Goal、同 Agent、当前已注册并绑定的接手会话**在认证传输验收后
-可以用自己的宿主路由检查与回写。内部 IO 接缝只能检查已消费操作，回写
-原系统的历史证据，不能消费未使用的票据、改写原执行器或取得第二次执行许可。原绑定
-仍有效、接手会话未绑定、Goal/Agent 不同均拒绝恢复准入。协议明确返回 `access.owner`、
-`original_route`、`permission: "historical_evidence_only"` 与绑定权威，不要求接手者
-冒充旧线程。原执行路由保持不可变；从接手绑定核对到结果提交共用 registry 锁，先提交
-的撤销拒绝回写。
+共享 TS 操作 frame 展示执行者、固定模型/思考深度、Goal/Agent/Todo 范围、可选来源
+上下文，并区分：已确认但外接认证不可用、已确认待绑定受管回合、已消费待证据、未知须
+对账，以及独立核验的结果投递。CLI、Dashboard 和原 Lark 卡消费同一 frame。
+结果读回必须匹配当前 `initial/reconciled` 阶段；旧未知结果的投递不能证明新对账结果。
+现有投递恢复更新原卡，不重提操作。delegation 结果验收及 requester 采用仍是独立
+回执，不新增自动 chat 回传协议。
 
-结果证据本身保持原样。规范操作单独追加 `outcome_report` 或 `reconciliation_report`
-来源，记录实际报告者、原路由、仅历史证据权限、权威来源、consumption ID 与记录时间。
-相同结果重试保留首次已提交来源，不重标作者或授予执行。内部检查同时返回原未知
-outcome 与不可变对账/来源；既有 Dashboard 共享 frame 与原 Lark 卡恢复消费同一
-规范结果，不另建恢复审批存储或执行控件。因公开宿主门禁关闭，旧正向 CLI 夹具已改为
-内部 IO/原卡读回检查；它们只证明历史对账语义，不代替受信宿主认证或真实群验收。
+### 资格化与剩余交付
 
-未知的原始 outcome 不可修改。确定性回写追加 `operation.reconciliation`，并通过
-`reconciles_outcome_digest` 绑定原未知结果的精确摘要；只有该证据才关闭恢复义务。
-现有投递恢复更新原结果卡，旧未知结果的投递不能证明新的对账结果；读回必须匹配当前
-`initial` 或 `reconciled` 阶段。上述路径均不会重新提交。
+本切片验证自有进程原生工具分发（含新 Turn 与同线程恢复 Turn 的有界真实 Codex
+context 调用，结果均由既有 typed result validator 接受）、规范
+批准/消费/结果夹具、profile/session 撤销、原路由隔离、delegation 预检和打包展示。
+真实 context 探针只在当前拥有的 home 创建新的受管 GPT session，不建提案、
+不造群确认、不执行金融副作用；合成批准夹具不是真实用户批准。
 
-本切片**没有实现主机即时唤醒**。Inbox 可见性如实返回
-`host_delivery: "not_attempted"`；既有 Turn/heartbeat 读取不等于主机投递回执。
-后续主机唤醒应复用原宿主传输，给出真实尝试/读回证据，不启动平行的 resumed session。
-本地合成回调、CLI、并发、到期、对账及打包 UI 检查只证明协议行为。宣称真实最小闭环
-之前，仍须安装、真实群确认、原 Agent 消费回执、真实平台/保护证据及原卡片读回。
-不得向真实群发送合成工程卡来冒充验收。
+公开 `goal-channel inspect-operation/consume-operation/report-operation` 仍在
+私有读写前拒绝，即使 `CODEX_THREAD_ID`、路由、自签 proof 完全匹配或旧运行时
+意外返回 actor 成功，也没有 proof-import 捷径。
+
+本切片不实现确认后的即时宿主唤醒，`host_delivery: "not_attempted"` 保持真实。
+沿既有已准入 Turn/delegation 续接；后续持久唤醒复用其调度/session owner，
+不启动平行 resumed 执行者。宣称投研最小闭环前，仍须证明安装、真实用户批准、
+绑定原生消费、垂域提交前检查与原系统证据、结果验收及原卡/受众读回。
+Core PR 仍须 owner review，不在合并前自行安装。
