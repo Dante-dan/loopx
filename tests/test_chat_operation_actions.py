@@ -170,6 +170,70 @@ def test_owned_managed_tool_uses_canonical_approval_once_without_desktop_binding
     assert recovered["ok"] is True and recovered["needs_reconciliation"] is False
 
 
+def test_managed_pending_reuses_registered_agent_and_goal_instance_scope(
+    tmp_path: Path,
+) -> None:
+    service, store = _service(tmp_path)
+    handler = _managed_handler(service, store)
+    native = {"thread_id": "owned-managed-thread", "host_turn_id": "native-turn-1"}
+    request = _request()
+    request["normalized_parameters"].pop("executor")
+    request["normalized_parameters"]["projection"]["simulated"] = False
+    proposal = handler(
+        "loopx_operation", {"action": "prepare", "request": request}, native
+    )["proposal"]
+    delivered = store.record_operation_delivery(
+        proposal["proposal_id"], delivery=_delivery(proposal)
+    )
+    store.decide_operation(
+        proposal["proposal_id"], decision="confirm", confirmation=_confirmation(delivered)
+    )
+    consumed = handler(
+        "loopx_operation",
+        {
+            "action": "consume",
+            "proposal_id": proposal["proposal_id"],
+            "consumption_id": "managed-attempt",
+        },
+        native,
+    )
+    assert consumed["execution_allowed"] is True
+    args = {"action": "pending"}
+    assert (
+        handler("loopx_operation", args, native)["items"][0]["operation_id"]
+        == proposal["proposal_id"]
+    )
+
+    registry = json.loads(service.registry_path.read_text())
+    registry["goals"][0]["activation_state"] = "stopped"
+    service.registry_path.write_text(json.dumps(registry))
+    # Stopping execution does not erase the original evidence-reconciliation locator.
+    historical = handler("loopx_operation", args, native)
+    assert historical["ok"] is True and historical["items"][0]["needs_reconciliation"]
+    assert historical["items"][0]["execution_allowed"] is False
+
+    registry.update(
+        profile_id="source_session_v1",
+        session_bindings=[],
+        session_receipts=[],
+        lifetime_receipts=[],
+    )
+    registry["goals"][0]["goal_instance_id"] = "ginst_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    service.registry_path.write_text(json.dumps(registry))
+    # A current exact-instance Inbox must not expose legacy, unbound locators.
+    scoped = handler("loopx_operation", args, native)
+    assert scoped["ok"] is True and scoped["items"] == []
+
+    registry["goals"][0]["coordination"]["registered_agents"] = []
+    service.registry_path.write_text(json.dumps(registry))
+    rejected = handler("loopx_operation", args, native)
+    assert rejected == {
+        "ok": False,
+        "error": "operation_admission_rejected",
+        "execution_allowed": False,
+    }
+
+
 def test_managed_replacement_has_evidence_only_access_and_never_inherits_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

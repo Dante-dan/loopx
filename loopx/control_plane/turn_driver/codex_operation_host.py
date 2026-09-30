@@ -18,6 +18,7 @@ from typing import Any
 from ...chat_agent import CodexChatAgentError, CodexChatAgentSession
 from ...chat_action_store import ChatActionStore
 from ...chat_actions import ChatActionService
+from ..collaboration.goal_instance_scope import collaboration_goal_scope
 from ..collaboration.operation_handoff import (
     agent_operation_action,
     pending_operation_handoffs,
@@ -126,17 +127,30 @@ def operation_tool_handler(
                     "external_write_performed": False,
                 }
             if action == "pending":
-                return {
-                    "ok": True,
-                    **pending_operation_handoffs(
-                        runtime_root,
-                        lineage["goal_id"],
-                        lineage["agent_id"],
-                        registry_path=registry_path,
-                        cursor=arguments.get("cursor"),
-                        cursor_scope="managed-operation:" + session_id,
-                    ),
-                }
+                with collaboration_goal_scope(
+                    registry_path,
+                    goal_id=lineage["goal_id"],
+                    agents=(lineage["agent_id"],),
+                ) as scope:
+                    cursor_scope = hashlib.sha256(
+                        json.dumps(
+                            ["managed-operation-v0", str(runtime_root.resolve()),
+                             scope.target(lineage["agent_id"]), executor],
+                            sort_keys=True, separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest()
+                    return {
+                        "ok": True,
+                        **pending_operation_handoffs(
+                            runtime_root,
+                            lineage["goal_id"],
+                            lineage["agent_id"],
+                            registry_path=registry_path,
+                            scope=scope,
+                            cursor=arguments.get("cursor"),
+                            cursor_scope=cursor_scope,
+                        ),
+                    }
             if action == "prepare":
                 request = dict(arguments["request"])
                 terms = dict(request.get("normalized_parameters") or {})
