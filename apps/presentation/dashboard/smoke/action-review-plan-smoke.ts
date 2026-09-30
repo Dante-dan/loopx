@@ -135,6 +135,17 @@ check(unauthenticatedFrame?.kind === "pending" && unauthenticatedFrame.execution
 const unknownAgentResult = typedActionProposalSchema.parse({...agentPending, status: "applied",
   receipt: {projection_verified: true}, operation: {...agentPending.operation, lifecycle_state: "outcome_observed",
     outcome: {outcome: "submission_unknown", simulation: false}, result_delivery: {outcome_stage: "initial"}}});
+const managedPending = typedActionProposalSchema.parse({...agentPending,
+  normalized_parameters: {...agentPending.normalized_parameters, agent_id: "managed-worker", executor: {
+    kind: "managed_turn", todo_id: "todo-managed", session_id: "owned-thread", profile_digest: "a".repeat(64),
+    model: "test-model", reasoning_effort: "xhigh", revision: "managed-turn-handoff-v0"}},
+  operation: {...agentPending.operation, agent_handoff: null}});
+const managedFrame = compileActionReviewPlan(managedPending).operationFrame;
+check(managedFrame?.kind === "pending" && managedFrame.executionState === "managed_turn_pending",
+  "Managed confirmation waits for its exact admitted executor rather than Desktop authentication");
+check(managedFrame?.content.fields.some(field => field.value.includes("test-model@xhigh")) === true,
+  "The shared managed profile survives the frontend schema transport");
+check(compileActionReviewPlan(managedPending).canApply === false, "Managed approval exposes no local execute control");
 check(compileActionReviewPlan(unknownAgentResult).interaction === "repair", "Delivered unknown submission is not completion");
 const reconciledAgentResult = typedActionProposalSchema.parse({...unknownAgentResult,
   operation: {...unknownAgentResult.operation, reconciliation: {outcome: "not_executed", simulation: false}}});

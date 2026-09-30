@@ -148,6 +148,26 @@ test("original-Agent pending, unknown and reconciled results share truthful surf
   assert.equal(proposal.operation.outcome.outcome, "submission_unknown");
 });
 
+test("managed executor and source context use the same frame without turning approval into execution", () => {
+  const proposal: Record<string, any> = operationProposal("claimed");
+  proposal.status = "applying";
+  proposal.normalized_parameters.agent_id = "worker";
+  proposal.normalized_parameters.executor = {kind: "managed_turn", todo_id: "todo-worker", model: "test-model", reasoning_effort: "xhigh"};
+  proposal.normalized_parameters.source_route = {host_surface: "codex-app", agent_id: "source-agent", thread_id: "private-source-thread"};
+  let frame = compileOperationReviewFrame(proposal);
+  assert.equal(frame?.kind === "pending" && frame.executionState, "managed_turn_pending");
+  assert.equal(frame?.content.fields.at(-3)?.value, "Managed Turn / 受管回合 · test-model@xhigh");
+  assert.equal(frame?.content.fields.at(-2)?.value, "worker · todo-worker");
+  assert.equal(frame?.content.fields.at(-1)?.value, "codex-app · source-agent");
+  assert.equal(JSON.stringify(frame).includes("private-source-thread"), false);
+  assert.equal(compileActionReviewPlan(proposal).canApply, false);
+  assert.equal(compileActionReviewPlan(proposal).reason, "operation_authorization_pending");
+  proposal.operation.agent_handoff = {consumption_id: "managed-attempt"};
+  frame = compileOperationReviewFrame(proposal);
+  assert.equal(frame?.kind === "pending" && frame.executionState, "consumed_outcome_pending");
+  assert.equal(compileActionReviewPlan(proposal).reason, "operation_outcome_pending");
+});
+
 test("generic action review keeps state precedence and stale classification", () => {
   const proposal = {
     proposal_id: "preview-1",

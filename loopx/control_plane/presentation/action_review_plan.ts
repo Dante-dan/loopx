@@ -10,6 +10,7 @@ export type ActionReviewReason =
   | "incomplete_proposal" | "authority_gate" | "stale_proposal"
   | "apply_pending" | "readback_verified" | "readback_unverified"
   | "apply_failed" | "inactive_proposal"
+  | "operation_authorization_pending" | "operation_outcome_pending"
   | "canonical_update_retry" | "canonical_update_projection_pending";
 
 export type OperationReviewContent = {
@@ -41,7 +42,7 @@ export type OperationReviewFrame = OperationReviewFrameBase & (
       kind: "pending";
       attentionKind: "progress";
       interactionMode: "inform";
-      executionState?: "host_authentication_required" | "consumed_outcome_pending";
+      executionState?: "host_authentication_required" | "managed_turn_pending" | "consumed_outcome_pending";
     }
   | {
       kind: "result";
@@ -276,6 +277,13 @@ function operationContent(parameters: JsonRecord): OperationReviewContent | null
     if (!label || !value) return null;
     fields.push({ label, value });
   }
+  const executor = objectValue(parameters.executor);
+  if (executor?.kind === "managed_turn") {
+    fields.push({label: "Executor / 执行者", value: `Managed Turn / 受管回合 · ${compactValue(executor.model, 80)}@${compactValue(executor.reasoning_effort, 20)}`});
+    fields.push({label: "Scope / 范围", value: `${compactValue(parameters.agent_id, 80)} · ${compactValue(executor.todo_id, 80)}`});
+    const source = objectValue(parameters.source_route);
+    if (source) fields.push({label: "Source context / 来源上下文", value: `${compactValue(source.host_surface, 60)} · ${compactValue(source.agent_id, 80)}`});
+  }
   return { title, subtitle, focus, fields, warning };
 }
 
@@ -322,8 +330,9 @@ export function compileOperationReviewFrame(proposalValue: unknown): OperationRe
       kind: "pending",
       attentionKind: "progress",
       interactionMode: "inform",
-      ...(objectValue(parameters.executor)?.kind === "agent_session"
-        ? {executionState: objectValue(operation.agent_handoff) ? "consumed_outcome_pending" as const : "host_authentication_required" as const}
+      ...(["agent_session", "managed_turn"].includes(String(objectValue(parameters.executor)?.kind))
+        ? {executionState: objectValue(operation.agent_handoff) ? "consumed_outcome_pending" as const
+          : objectValue(parameters.executor)?.kind === "managed_turn" ? "managed_turn_pending" as const : "host_authentication_required" as const}
         : {}),
     };
   }
@@ -339,7 +348,7 @@ export function compileOperationReviewFrame(proposalValue: unknown): OperationRe
     resultKind: outcome.outcome === "submission_unknown" ? "unknown" : outcome.outcome === "not_executed" ? "not_executed"
       : rejected ? "rejected" : simulated ? "simulation_completed" : "completed",
     resultDeliveryVerified: objectValue(operation.result_delivery) !== null
-      && (objectValue(parameters.executor)?.kind !== "agent_session"
+      && (!["agent_session", "managed_turn"].includes(String(objectValue(parameters.executor)?.kind))
         || objectValue(operation.result_delivery)?.outcome_stage === (operation.reconciliation ? "reconciled" : "initial")),
     summary: textValue(outcome.summary) ?? "",
   };
@@ -401,7 +410,13 @@ export function compileActionReviewPlan(proposalValue: unknown): ActionReviewPla
       reason: failure?.error_code === "canonical_update_projection_pending"
         ? "canonical_update_projection_pending" : "canonical_update_retry"}), retryOriginal: true};
   }
-  if (proposal.status === "applying") return held("pending", "apply_pending");
+  if (proposal.status === "applying") {
+    if (operationFrame?.kind === "pending" && operationFrame.executionState) {
+      return held("pending", operationFrame.executionState === "consumed_outcome_pending"
+        ? "operation_outcome_pending" : "operation_authorization_pending");
+    }
+    return held("pending", "apply_pending");
+  }
   if (proposal.status === "failed" || proposal.error != null) return held("repair", "apply_failed");
   if (proposal.status !== "preview_ready" && proposal.status !== "deferred") return held("inactive", "inactive_proposal");
   const reviewed = (reason: ActionReviewReason, canApply = true): ActionReviewPlan =>

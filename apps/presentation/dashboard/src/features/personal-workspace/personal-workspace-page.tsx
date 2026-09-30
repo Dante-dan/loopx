@@ -657,7 +657,8 @@ function workspaceProposal(proposal: TypedActionProposal, t: WorkspaceTranslate)
     impact: reviewPlan.retryOriginal ? t(`actionReview.${reviewPlan.reason}`) : proposal.action_kind === "operation.execute"
       ? operationFrame?.kind === "pending" && operationFrame.executionState
         ? t(operationFrame.executionState === "consumed_outcome_pending"
-          ? "proposal.impact.operationConsumed" : "proposal.impact.operationAuthorized")
+          ? "proposal.impact.operationConsumed" : operationFrame.executionState === "managed_turn_pending"
+          ? "proposal.impact.operationManagedPending" : "proposal.impact.operationAuthorized")
         : operationFrame?.kind === "result" && operationFrame.resultKind === "unknown"
         ? t("proposal.impact.operationUnknown") : t("proposal.impact.operation")
       : proposal.action_kind === "team.plan"
