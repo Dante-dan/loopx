@@ -423,6 +423,7 @@ class CodexChatAgentSession:
     work_dir: Path
     context_summary: str = ""
     execution_mode: bool = False
+    process_tree_owned: bool = False
     runtime_profile: str = "restricted"
     sandbox: str = "read-only"
     model: str | None = None
@@ -435,6 +436,9 @@ class CodexChatAgentSession:
     model_catalog_compatibility_applied: bool = False
     read_tool_handler: Callable[[str, Any], dict[str, Any]] | None = field(
         default=None, repr=False
+    )
+    bound_tool_handler: Callable[[str, Any, dict[str, Any]], dict[str, Any]] | None = (
+        field(default=None, repr=False)
     )
     _pending_events: "queue.Queue[dict[str, Any]]" = field(
         default_factory=queue.Queue, repr=False
@@ -465,12 +469,14 @@ class CodexChatAgentSession:
         hard_timeout_sec: float = 900.0,
         resume_thread_id: str | None = None,
         execution_mode: bool = False,
+        isolate_process_tree: bool = False,
         runtime_profile: str = "restricted",
         sandbox: str | None = None,
         codex_home: Path | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         dynamic_tools: list[dict[str, Any]] | None = None,
+        host_config: dict[str, Any] | None = None,
         _compatibility_catalog_path: Path | None = None,
     ) -> "CodexChatAgentSession":
         resolved = shutil.which(codex_bin)
@@ -535,6 +541,7 @@ class CodexChatAgentSession:
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
+                start_new_session=isolate_process_tree and os.name == "posix",
             )
         except OSError as exc:
             raise CodexChatAgentError(
@@ -561,6 +568,7 @@ class CodexChatAgentSession:
             idle_timeout_sec=idle_timeout_sec,
             hard_timeout_sec=hard_timeout_sec,
             execution_mode=execution_mode,
+            process_tree_owned=isolate_process_tree,
             runtime_profile=runtime_profile,
             sandbox=selected_sandbox,
             model=model,
@@ -592,8 +600,17 @@ class CodexChatAgentSession:
                     "cwd": str(root),
                     **({"model": model} if model else {}),
                     **(
-                        {"config": {"model_reasoning_effort": reasoning_effort}}
-                        if reasoning_effort
+                        {
+                            "config": {
+                                **(host_config or {}),
+                                **(
+                                    {"model_reasoning_effort": reasoning_effort}
+                                    if reasoning_effort
+                                    else {}
+                                ),
+                            }
+                        }
+                        if reasoning_effort or host_config
                         else {}
                     ),
                     "sandbox": selected_sandbox,
@@ -649,12 +666,14 @@ class CodexChatAgentSession:
                     hard_timeout_sec=hard_timeout_sec,
                     resume_thread_id=resume_thread_id,
                     execution_mode=execution_mode,
+                    isolate_process_tree=isolate_process_tree,
                     runtime_profile=runtime_profile,
                     sandbox=selected_sandbox,
                     codex_home=runtime_home,
                     model=model,
                     reasoning_effort=reasoning_effort,
                     dynamic_tools=dynamic_tools,
+                    host_config=host_config,
                     _compatibility_catalog_path=catalog_path,
                 )
         except Exception:
@@ -731,7 +750,10 @@ class CodexChatAgentSession:
         if (
             message.get("id") is not None
             and message.get("method") == "item/tool/call"
-            and self.read_tool_handler
+            and (
+                self.read_tool_handler
+                or (self.execution_mode and self.bound_tool_handler)
+            )
         ):
             params = message.get("params") or {}
             valid = (
@@ -743,8 +765,20 @@ class CodexChatAgentSession:
             )
             try:
                 result = (
-                    self.read_tool_handler(
-                        params.get("tool", ""), params.get("arguments")
+                    (
+                        self.bound_tool_handler(
+                            params.get("tool", ""),
+                            params.get("arguments"),
+                            {
+                                "thread_id": params["threadId"],
+                                "host_turn_id": params["turnId"],
+                                "call_id": params.get("callId"),
+                            },
+                        )
+                        if self.execution_mode and self.bound_tool_handler
+                        else self.read_tool_handler(
+                            params.get("tool", ""), params.get("arguments")
+                        )
                     )
                     if valid
                     else {
@@ -805,7 +839,9 @@ class CodexChatAgentSession:
                         except queue.Empty:
                             remaining = deadline - time.monotonic()
                             if remaining <= 0:
-                                raise self._runtime_error("Codex app-server timed out.")
+                                raise self._timeout_error(
+                                    "response_timeout", "Codex app-server timed out."
+                                )
                             try:
                                 raw = self.messages.get(timeout=min(0.1, remaining))
                             except queue.Empty:
@@ -902,17 +938,22 @@ class CodexChatAgentSession:
         *,
         attachments: list[dict[str, Any]] | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        output_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         text = " ".join(str(user_message or "").split())
         if not text:
             raise ValueError("user message is required")
+        if output_schema is not None and not self.execution_mode:
+            raise ValueError("structured Turn output requires an execution session")
         with self._request_id_lock:
             request_id = self.next_request_id
             self.next_request_id += 1
         turn_input: list[dict[str, Any]] = [
             {
                 "type": "text",
-                "text": _turn_prompt(
+                "text": text
+                if output_schema is not None
+                else _turn_prompt(
                     text,
                     context_summary=self.context_summary,
                     execution_mode=self.execution_mode,
@@ -933,6 +974,9 @@ class CodexChatAgentSession:
                 **({"model": self.model} if self.model else {}),
                 **({"effort": self.reasoning_effort} if self.reasoning_effort else {}),
                 "approvalPolicy": "never",
+                **(
+                    {"outputSchema": output_schema} if output_schema is not None else {}
+                ),
             },
             request_id=request_id,
         )
@@ -1068,6 +1112,17 @@ class CodexChatAgentSession:
             visible_delta_count += 1
             on_event("answer.delta", {"text": visible_tail})
         raw_response = "".join(parts)
+        if output_schema is not None:
+            try:
+                result = json.loads(raw_response)
+            except (ValueError, TypeError) as exc:
+                raise self._runtime_error(
+                    "Codex Turn did not return structured output."
+                ) from exc
+            if not isinstance(result, dict):
+                raise self._runtime_error("Codex Turn output is not an object.")
+            self.current_turn_id = ""
+            return result
         response = parse_agent_response(
             raw_response,
             protected_paths=[self.work_dir],
@@ -1095,6 +1150,11 @@ class CodexChatAgentSession:
         )
 
     def close(self) -> None:
+        if self.process_tree_owned:
+            from .extensions.process_runtime import terminate_process_tree
+
+            terminate_process_tree(self.process, grace_seconds=0.1)
+            return
         if self.process.poll() is not None:
             return
         self.process.terminate()

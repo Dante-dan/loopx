@@ -981,7 +981,7 @@ class ChatActionStore:
                 raise KeyError("typed operation was not found")
             parameters = proposal.get("normalized_parameters") or {}
             report_provenance = None
-            if (parameters.get("executor") or {}).get("kind") == "agent_session":
+            if (parameters.get("executor") or {}).get("kind") in {"agent_session", "managed_turn"}:
                 plan = self._agent_operation_plan(
                     proposal,
                     action="report",
@@ -1151,7 +1151,7 @@ class ChatActionStore:
                 )
             is_agent = (
                 (proposal.get("normalized_parameters") or {}).get("executor") or {}
-            ).get("kind") == "agent_session"
+            ).get("kind") in {"agent_session", "managed_turn"}
             expected_stage = (
                 "reconciled"
                 if operation.get("reconciliation") is not None

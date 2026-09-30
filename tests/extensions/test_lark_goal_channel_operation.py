@@ -53,7 +53,9 @@ APP_ID = "cli_operation_fixture"
 TENANT_KEY = "tenant_operation_fixture"
 
 
-def _prepare_agent_handoff(store: ChatActionStore, registry: Path) -> dict[str, Any]:
+def _prepare_agent_handoff(
+    store: ChatActionStore, registry: Path, *, managed: bool = False
+) -> dict[str, Any]:
     baseline = _prepare(store, registry)
     data = json.loads(registry.read_text())
     data["goals"][0]["coordination"]["thread_agent_bindings"] = [
@@ -73,6 +75,30 @@ def _prepare_agent_handoff(store: ChatActionStore, registry: Path) -> dict[str, 
         "revision": "agent-session-handoff-v0",
     }
     parameters["operation_kind"] = "fixture.submit"
+    if managed:
+        from loopx.control_plane.turn_driver.codex_cli import _store_codex_cli_session
+
+        _store_codex_cli_session(
+            store.root.parent.parent,
+            lineage={
+                "goal_id": GOAL_ID,
+                "agent_id": AGENT_ID,
+                "todo_id": "todo-managed",
+            },
+            session_id="owned-managed-thread",
+            operation_profile_digest="c" * 64,
+            operation_model="test-model",
+            operation_reasoning_effort="xhigh",
+        )
+        parameters["executor"] = {
+            "kind": "managed_turn",
+            "todo_id": "todo-managed",
+            "session_id": "owned-managed-thread",
+            "profile_digest": "c" * 64,
+            "model": "test-model",
+            "reasoning_effort": "xhigh",
+            "revision": "managed-turn-handoff-v0",
+        }
     parameters["projection"] = {
         **parameters["projection"],
         "simulated": False,
@@ -91,13 +117,15 @@ def _prepare_agent_handoff(store: ChatActionStore, registry: Path) -> dict[str, 
     )
 
 
+@pytest.mark.parametrize("managed", [False, True])
 def test_authenticated_callback_hands_off_without_calling_any_executor_and_reconciles_original_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    managed: bool,
 ) -> None:
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-operation-fixture")
     store, registry, runtime, binding, target = _fixture(tmp_path)
-    proposal = _prepare_agent_handoff(store, registry)
+    proposal = _prepare_agent_handoff(store, registry, managed=managed)
     cards: dict[str, dict[str, Any]] = {}
     runner = _runner([], cards)
     deliver_goal_channel_operation_card(
@@ -138,7 +166,9 @@ def test_authenticated_callback_hands_off_without_calling_any_executor_and_recon
     assert first["callback_ack_is_execution_receipt"] is False
     claimed = store.load(proposal["proposal_id"])
     assert claimed["operation"]["result_delivery"] is None
-    assert "原宿主身份认证尚未接通" in normalized_card_text(next(iter(cards.values())))
+    assert (
+        "等待绑定的受管回合" if managed else "原宿主身份认证尚未接通"
+    ) in normalized_card_text(next(iter(cards.values())))
     actor = {
         "goal_id": GOAL_ID,
         "agent_id": AGENT_ID,
@@ -146,6 +176,16 @@ def test_authenticated_callback_hands_off_without_calling_any_executor_and_recon
         "thread_id": "thread-operation-fixture",
     }
     context = GoalChannelOperationContext(runtime, registry, runtime, binding)
+    if managed:
+        actor.update(
+            host_surface="loopx-managed-codex",
+            thread_id="owned-managed-thread",
+            todo_id="todo-managed",
+            profile_digest="c" * 64,
+            host_turn_id="native-turn-1",
+            model="test-model",
+            reasoning_effort="xhigh",
+        )
     args = Namespace(
         goal_channel_command="consume-operation",
         goal_id=GOAL_ID,

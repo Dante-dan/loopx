@@ -6,7 +6,9 @@ import {EffectRuntimeConflictError, EffectRuntimeRequestError} from "../effect_r
 import {requireJsonObject, requireNonEmptyString} from "../runtime_decode.ts";
 
 export const AGENT_OPERATION_REVISION = "agent-session-handoff-v0";
+export const MANAGED_OPERATION_REVISION = "managed-turn-handoff-v0";
 const ID = /^[A-Za-z0-9._:-]{1,200}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 
 function id(value: unknown, field: string): string {
   const result = requireNonEmptyString(value, field);
@@ -25,8 +27,35 @@ function timestamp(value: unknown): number {
   return parsed;
 }
 
+/** Readback of an operator-selected transport. This is not a session binding,
+ * a runtime qualification or an execution permit. Python supplies argv facts. */
+export function projectManagedOperationTransport(input: JsonObject): JsonObject {
+  const reason = input.host !== "codex-cli" ? "operation_transport_host_unsupported"
+    : !["read-only", "workspace-write"].includes(String(input.sandbox)) ? "operation_transport_sandbox_unsupported"
+    : typeof input.model !== "string" || !ID.test(input.model)
+      || !["minimal", "low", "medium", "high", "xhigh"].includes(String(input.reasoning_effort))
+      ? "operation_transport_profile_required" : null;
+  return {reason, transport: {schema_version: "loopx_operation_transport_v0",
+    kind: "owned_app_server", revision: "app-server-operation-tools-v0",
+    configuration_valid: reason === null, runtime_qualified: false,
+    identity_source: "native_thread_turn_metadata", human_confirmation_required: true,
+    first_consumption_required: true, source_conversation_is_executor: false}};
+}
+
 export function normalizeAgentOperationExecutor(input: JsonObject): JsonObject {
   const executor = requireJsonObject(input.executor, "agent executor");
+  if (executor.kind === "managed_turn") {
+    const keys = ["kind", "todo_id", "session_id", "profile_digest", "model", "reasoning_effort", "revision"];
+    if (Object.keys(executor).length !== keys.length || keys.some(key => !(key in executor))
+      || executor.revision !== MANAGED_OPERATION_REVISION
+      || typeof executor.profile_digest !== "string" || !SHA256.test(executor.profile_digest)) {
+      throw new EffectRuntimeRequestError("managed operation executor binding is invalid");
+    }
+    return {kind: "managed_turn", todo_id: id(executor.todo_id, "todo_id"),
+      session_id: id(executor.session_id, "session_id"), profile_digest: executor.profile_digest,
+      model: id(executor.model, "model"), reasoning_effort: id(executor.reasoning_effort, "reasoning_effort"),
+      revision: MANAGED_OPERATION_REVISION};
+  }
   const keys = ["kind", "host_surface", "thread_id", "revision"];
   if (Object.keys(executor).length !== keys.length || keys.some(key => !(key in executor))
     || executor.kind !== "agent_session" || executor.revision !== AGENT_OPERATION_REVISION) {
@@ -34,6 +63,30 @@ export function normalizeAgentOperationExecutor(input: JsonObject): JsonObject {
   }
   return {kind: "agent_session", host_surface: id(executor.host_surface, "host_surface"),
     thread_id: id(executor.thread_id, "thread_id"), revision: AGENT_OPERATION_REVISION};
+}
+
+/** Filesystem/session observations are supplied by the existing Turn session
+ * owner. A registered source conversation is context/return routing, not the
+ * identity of a managed executor. No transport proof is accepted by this RPC. */
+export function managedOperationBindingCurrent(input: JsonObject): JsonObject {
+  const parameters = requireJsonObject(input.parameters, "operation parameters");
+  const executor = normalizeAgentOperationExecutor({executor: parameters.executor});
+  const session = input.session == null ? null : requireJsonObject(input.session, "Turn session");
+  const expectedRef = parameters.origin_goal_ref == null ? null
+    : requireJsonObject(parameters.origin_goal_ref, "origin Goal ref");
+  const observedRef = session?.goal_ref == null ? null : requireJsonObject(session.goal_ref, "session Goal ref");
+  const sameGoalRef = expectedRef === null
+    ? observedRef === null || (observedRef.goal_id === parameters.goal_id && observedRef.goal_instance_id == null)
+    : observedRef !== null && expectedRef.goal_id === observedRef.goal_id
+      && expectedRef.goal_instance_id === observedRef.goal_instance_id;
+  return {current: executor.kind === "managed_turn" && session !== null
+    && session.schema_version === "loopx_codex_cli_session_v1"
+    && session.goal_id === parameters.goal_id && session.agent_id === parameters.agent_id
+    && session.todo_id === executor.todo_id && session.session_id === executor.session_id
+    && session.operation_transport === "app-server-operation-tools-v0"
+    && session.operation_profile_digest === executor.profile_digest
+    && session.operation_model === executor.model && session.operation_reasoning_effort === executor.reasoning_effort
+    && sameGoalRef};
 }
 
 /** No qualified host producer is connected to the public CLI. Ambient thread
@@ -60,7 +113,8 @@ function historicalAccess(input: JsonObject, route: JsonObject, consumed: boolea
   const owner = Object.fromEntries(Object.keys(route).map(key => [key, id(actor[key], `actor.${key}`)]));
   return {mode: original ? "original_session" : "replacement_reconciliation", owner,
     original_route: route, permission: "historical_evidence_only", execution_allowed: false,
-    authority_source: original ? "original_operation_route" : "current_registry_binding"};
+    authority_source: original ? "original_operation_route"
+      : actor.host_surface === "loopx-managed-codex" ? "current_turn_session_binding" : "current_registry_binding"};
 }
 
 export function planAgentOperationHandoff(input: JsonObject): JsonObject {
@@ -85,14 +139,18 @@ export function planAgentOperationHandoff(input: JsonObject): JsonObject {
   const claim = operation.claim == null ? null : requireJsonObject(operation.claim, "operation claim");
   const now = timestamp(input.now);
   const expires = timestamp(operation.expires_at);
-  const route = {goal_id: parameters.goal_id, agent_id: parameters.agent_id,
-    host_surface: executor.host_surface, thread_id: executor.thread_id};
+  const managed = executor.kind === "managed_turn";
+  const route: JsonObject = {goal_id: parameters.goal_id, agent_id: parameters.agent_id,
+    ...(managed ? {host_surface: "loopx-managed-codex", thread_id: executor.session_id,
+      todo_id: executor.todo_id, profile_digest: executor.profile_digest}
+      : {host_surface: executor.host_surface, thread_id: executor.thread_id})};
   const base: JsonObject = {schema_version: "loopx_operation_agent_handoff_v0", operation_id: operation.operation_id,
     payload_digest: operation.payload_digest, confirmation_digest: operation.confirmation_digest,
     claim_id: claim?.claim_id ?? null, executor_revision: executor.revision, expires_at: operation.expires_at,
     route, authorization_source: "canonical_typed_operation", execution_allowed: false,
     host_delivery: "not_attempted", external_write_performed: false,
-    host_authentication_required: true};
+    executor_kind: executor.kind, source_route: parameters.source_route ?? null,
+    host_authentication_required: !managed};
   const handoff = operation.agent_handoff == null ? null
     : requireJsonObject(operation.agent_handoff, "agent handoff");
   const observed = operation.reconciliation ?? operation.outcome;
@@ -115,6 +173,8 @@ export function planAgentOperationHandoff(input: JsonObject): JsonObject {
     requireThat(Object.entries(route).every(([key, value]) => actor[key] === value),
       "execution actor is not the original bound session");
     requireThat(input.binding_current === true, "original session binding is no longer current");
+    if (managed) requireThat(typeof actor.host_turn_id === "string" && ID.test(actor.host_turn_id),
+      "managed operation requires its transport-owned active Turn");
     // Even a same-id retry returns no execute permission. A lost response after
     // this commit is ambiguous, never permission to submit a second order.
     if (handoff || operation.lifecycle_state === "outcome_observed") {
@@ -124,6 +184,7 @@ export function planAgentOperationHandoff(input: JsonObject): JsonObject {
     requireThat(now < expires, "confirmed operation expired before execution consumption");
     return {...base, status: "consumed_outcome_pending", execution_allowed: true,
       write_handoff: {...base, status: "consumed_outcome_pending", consumed_at: input.now,
+        ...(managed ? {host_turn_id: actor.host_turn_id} : {}),
         consumption_id: id(input.consumption_id, "consumption_id")}};
   }
   if (action === "report") {

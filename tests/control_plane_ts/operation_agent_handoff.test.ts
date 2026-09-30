@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type {JsonObject} from "../../loopx/control_plane/effect_program.ts";
-import {AGENT_OPERATION_REVISION, deriveAgentOperationActor, normalizeAgentOperationExecutor, planAgentOperationHandoff,
-  projectAgentOperationInbox} from "../../loopx/control_plane/work_items/operation_agent_handoff.ts";
+import {AGENT_OPERATION_REVISION, MANAGED_OPERATION_REVISION, managedOperationBindingCurrent, deriveAgentOperationActor, normalizeAgentOperationExecutor, planAgentOperationHandoff,
+  projectAgentOperationInbox, projectManagedOperationTransport} from "../../loopx/control_plane/work_items/operation_agent_handoff.ts";
 
 function input(): JsonObject {
   const executor = {kind: "agent_session", host_surface: "codex-app", thread_id: "original-thread",
@@ -21,6 +21,64 @@ function input(): JsonObject {
       normalized_parameters: parameters, operation}};
 }
 const operation = (value: JsonObject) => (value.proposal as JsonObject).operation as JsonObject;
+
+test("operator transport preflight projects pinned configuration without claiming authentication or runtime qualification", () => {
+  const input = {host: "codex-cli", sandbox: "read-only", model: "test-model", reasoning_effort: "xhigh"};
+  const projected = projectManagedOperationTransport(input);
+  assert.equal(projected.reason, null);
+  assert.equal((projected.transport as JsonObject).configuration_valid, true);
+  assert.equal((projected.transport as JsonObject).runtime_qualified, false);
+  assert.equal((projected.transport as JsonObject).source_conversation_is_executor, false);
+  for (const invalid of [{host: "dsh"}, {sandbox: "danger-full-access"}, {model: null}, {reasoning_effort: "unknown"}]) {
+    const refused = projectManagedOperationTransport({...input, ...invalid});
+    assert.equal((refused.transport as JsonObject).configuration_valid, false);
+    assert.notEqual(refused.reason, null);
+  }
+});
+
+function managedInput(): JsonObject {
+  const value = input();
+  const parameters = (value.proposal as JsonObject).normalized_parameters as JsonObject;
+  parameters.executor = {kind: "managed_turn", todo_id: "todo-worker", session_id: "owned-thread",
+    profile_digest: "a".repeat(64), model: "test-model", reasoning_effort: "xhigh", revision: MANAGED_OPERATION_REVISION};
+  parameters.source_route = {...value.actor as JsonObject};
+  operation(value).executor_revision = MANAGED_OPERATION_REVISION;
+  value.actor = {goal_id: "test-goal", agent_id: "test-agent", host_surface: "loopx-managed-codex",
+    thread_id: "owned-thread", todo_id: "todo-worker", profile_digest: "a".repeat(64), host_turn_id: "native-turn"};
+  return value;
+}
+
+test("source context is not managed execution identity and old approvals never migrate", () => {
+  const value = managedInput();
+  const plan = planAgentOperationHandoff(value);
+  assert.equal(plan.execution_allowed, true);
+  assert.equal(plan.host_authentication_required, false);
+  assert.equal((plan.source_route as JsonObject).host_surface, "codex-app");
+  assert.equal((plan.route as JsonObject).host_surface, "loopx-managed-codex");
+  assert.equal((plan.write_handoff as JsonObject).host_turn_id, "native-turn");
+  for (const change of [
+    {thread_id: "other-thread"}, {profile_digest: "b".repeat(64)}, {todo_id: "todo-other"},
+    {host_surface: "codex-app"}, {host_turn_id: null},
+  ]) assert.throws(() => planAgentOperationHandoff({...value, actor: {...value.actor as JsonObject, ...change}}));
+  assert.throws(() => planAgentOperationHandoff({...input(), actor: value.actor}));
+  operation(value).agent_handoff = plan.write_handoff;
+  assert.equal(planAgentOperationHandoff(value).execution_allowed, false);
+});
+
+test("managed binding is the existing exact Goal/Todo/session/profile owner, never a source route", () => {
+  const parameters = (managedInput().proposal as JsonObject).normalized_parameters as JsonObject;
+  parameters.origin_goal_ref = {goal_id: "test-goal", goal_instance_id: "instance-1"};
+  const session = {schema_version: "loopx_codex_cli_session_v1", goal_id: "test-goal", agent_id: "test-agent",
+    todo_id: "todo-worker", session_id: "owned-thread", operation_profile_digest: "a".repeat(64),
+    operation_transport: "app-server-operation-tools-v0",
+    operation_model: "test-model", operation_reasoning_effort: "xhigh",
+    goal_ref: {goal_instance_id: "instance-1", goal_id: "test-goal"}};
+  assert.equal(managedOperationBindingCurrent({parameters, session}).current, true);
+  for (const changed of [{session_id: "replacement"}, {todo_id: "other"}, {agent_id: "other"},
+    {operation_profile_digest: "b".repeat(64)}, {operation_transport: null}, {goal_ref: {goal_id: "test-goal", goal_instance_id: "instance-2"}},
+    {schema_version: "future"}]) assert.equal(managedOperationBindingCurrent({parameters, session: {...session, ...changed}}).current, false);
+  assert.equal(managedOperationBindingCurrent({parameters, session: null}).current, false);
+});
 
 test("public caller identity stays blocked, including exact same-user environment forgery", () => {
   const requested = input().actor as JsonObject;

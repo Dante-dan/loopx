@@ -68,6 +68,314 @@ def _claim_agent_operation(
     )
 
 
+def _managed_handler(
+    service: ChatActionService,
+    store: ChatActionStore,
+    *,
+    session_id="owned-managed-thread",
+    profile_digest="c" * 64,
+    todo_id="todo-managed",
+    model="test-model",
+    reasoning_effort="xhigh",
+):
+    from loopx.control_plane.turn_driver.codex_cli import _store_codex_cli_session
+    from loopx.control_plane.turn_driver.codex_operation_host import (
+        operation_tool_handler,
+    )
+
+    lineage = {
+        "goal_id": GOAL_ID,
+        "agent_id": "finance-fixture-agent",
+        "todo_id": todo_id,
+    }
+    runtime = store.root.parent.parent
+    _store_codex_cli_session(
+        runtime,
+        lineage=lineage,
+        session_id=session_id,
+        operation_profile_digest=profile_digest,
+        operation_model=model,
+        operation_reasoning_effort=reasoning_effort,
+    )
+    return operation_tool_handler(
+        runtime_root=runtime,
+        registry_path=service.registry_path,
+        lineage=lineage,
+        session_id=session_id,
+        profile_digest=profile_digest,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+
+
+def test_owned_managed_tool_uses_canonical_approval_once_without_desktop_binding(
+    tmp_path: Path,
+) -> None:
+    service, store = _service(tmp_path)
+    handler = _managed_handler(service, store)
+    native = {"thread_id": "owned-managed-thread", "host_turn_id": "native-turn-1"}
+    request = _request()
+    request["normalized_parameters"].pop("executor")
+    request["normalized_parameters"]["projection"]["simulated"] = False
+    prepared = handler(
+        "loopx_operation", {"action": "prepare", "request": request}, native
+    )
+    assert prepared["ok"] is True and prepared["execution_allowed"] is False
+    proposal = prepared["proposal"]
+    executor = proposal["normalized_parameters"]["executor"]
+    assert executor["kind"] == "managed_turn"
+    assert executor["session_id"] == native["thread_id"]
+    args = {
+        "action": "consume",
+        "proposal_id": proposal["proposal_id"],
+        "consumption_id": "managed-attempt",
+    }
+    assert handler("loopx_operation", args, native)["ok"] is False  # no human approval
+    delivered = store.record_operation_delivery(
+        proposal["proposal_id"], delivery=_delivery(proposal)
+    )
+    claimed = store.decide_operation(
+        proposal["proposal_id"],
+        decision="confirm",
+        confirmation=_confirmation(delivered),
+    )
+    consumed = handler("loopx_operation", args, native)
+    assert consumed["ok"] is True and consumed["execution_allowed"] is True
+    assert handler("loopx_operation", args, native)["execution_allowed"] is False
+    persisted = store.load(proposal["proposal_id"])
+    assert persisted["operation"]["agent_handoff"]["host_turn_id"] == "native-turn-1"
+    outcome = _agent_result(claimed, "managed-attempt", result="submission_unknown")
+    reported = handler(
+        "loopx_operation",
+        {
+            "action": "report",
+            "proposal_id": proposal["proposal_id"],
+            "outcome": outcome,
+        },
+        native,
+    )
+    assert reported["ok"] is True and reported["needs_reconciliation"] is True
+    assert handler("loopx_operation", args, native)["execution_allowed"] is False
+    final = {
+        **outcome,
+        "outcome": "not_executed",
+        "external_write_performed": False,
+        "reconciles_outcome_digest": reported["outcome_digest"],
+    }
+    recovered = handler(
+        "loopx_operation",
+        {"action": "report", "proposal_id": proposal["proposal_id"], "outcome": final},
+        native,
+    )
+    assert recovered["ok"] is True and recovered["needs_reconciliation"] is False
+
+
+def test_managed_replacement_has_evidence_only_access_and_never_inherits_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+    from threading import Event, current_thread
+    from loopx.control_plane.collaboration import operation_handoff
+    from loopx.control_plane.turn_driver import codex_cli
+    from loopx.control_plane.turn_driver.codex_cli import _discard_codex_cli_session
+
+    service, store = _service(tmp_path)
+    original = _managed_handler(service, store)
+    native = {"thread_id": "owned-managed-thread", "host_turn_id": "native-turn-1"}
+    request = _request()
+    request["normalized_parameters"].pop("executor")
+    request["normalized_parameters"]["projection"]["simulated"] = False
+    proposal = original(
+        "loopx_operation", {"action": "prepare", "request": request}, native
+    )["proposal"]
+    delivered = store.record_operation_delivery(
+        proposal["proposal_id"], delivery=_delivery(proposal)
+    )
+    confirmed = store.decide_operation(
+        proposal["proposal_id"],
+        decision="confirm",
+        confirmation=_confirmation(delivered),
+    )
+    args = {
+        "action": "consume",
+        "proposal_id": proposal["proposal_id"],
+        "consumption_id": "managed-attempt",
+    }
+    assert original("loopx_operation", args, native)["execution_allowed"] is True
+    unknown = _agent_result(confirmed, "managed-attempt", result="submission_unknown")
+    reported = original(
+        "loopx_operation",
+        {
+            "action": "report",
+            "proposal_id": proposal["proposal_id"],
+            "outcome": unknown,
+        },
+        native,
+    )
+    replacement = _managed_handler(
+        service,
+        store,
+        session_id="replacement-thread",
+        profile_digest="d" * 64,
+        todo_id="todo-recovery",
+        model="replacement-model",
+        reasoning_effort="high",
+    )
+    replacement_native = {
+        "thread_id": "replacement-thread",
+        "host_turn_id": "native-recovery-turn",
+    }
+    inspect = {"action": "inspect", "proposal_id": proposal["proposal_id"]}
+    assert replacement("loopx_operation", inspect, replacement_native)["ok"] is False
+    _discard_codex_cli_session(
+        store.root.parent.parent,
+        lineage={
+            "goal_id": GOAL_ID,
+            "agent_id": "finance-fixture-agent",
+            "todo_id": "todo-managed",
+        },
+    )
+    observed = replacement("loopx_operation", inspect, replacement_native)
+    assert observed["ok"] is True and observed["execution_allowed"] is False
+    assert observed["access"]["permission"] == "historical_evidence_only"
+    assert observed["access"]["owner"]["todo_id"] == "todo-recovery"
+    assert observed["access"]["authority_source"] == "current_turn_session_binding"
+    assert replacement("loopx_operation", args, replacement_native)["ok"] is False
+    final = {
+        **unknown,
+        "outcome": "not_executed",
+        "external_write_performed": False,
+        "reconciles_outcome_digest": reported["outcome_digest"],
+    }
+    attempted, acquired = Event(), Event()
+    original_lock = codex_cli.exclusive_file_lock
+    original_binding = operation_handoff._binding
+    original_write = ChatActionStore._write
+    commits = []
+
+    @contextmanager
+    def observed_lock(path, *args, **kwargs):
+        revoking = current_thread().name.startswith("managed-revoker")
+        if revoking:
+            attempted.set()
+        with original_lock(path, *args, **kwargs) as proof:
+            if revoking:
+                acquired.set()
+            yield proof
+
+    def revoke():
+        _discard_codex_cli_session(
+            store.root.parent.parent,
+            lineage={"goal_id": GOAL_ID, "agent_id": "finance-fixture-agent",
+                     "todo_id": "todo-recovery"},
+        )
+        commits.append("revocation")
+
+    def record_report(self, payload):
+        original_write(self, payload)
+        commits.append("report")
+
+    monkeypatch.setattr(codex_cli, "exclusive_file_lock", observed_lock)
+    monkeypatch.setattr(ChatActionStore, "_write", record_report)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="managed-revoker") as executor:
+        futures = []
+
+        def interleaved_binding(registry_path, parameters, runtime_root):
+            current = original_binding(registry_path, parameters, runtime_root)
+            if parameters["executor"].get("todo_id") == "todo-recovery":
+                futures.append(executor.submit(revoke))
+                assert attempted.wait(5)
+                assert not acquired.wait(0.2), "replacement revocation must wait for report commit"
+            return current
+
+        monkeypatch.setattr(operation_handoff, "_binding", interleaved_binding)
+        assert replacement(
+            "loopx_operation",
+            {"action": "report", "proposal_id": proposal["proposal_id"], "outcome": final},
+            replacement_native,
+        )["ok"] is True
+        futures[0].result(timeout=5)
+    assert commits == ["report", "revocation"]
+    monkeypatch.setattr(operation_handoff, "_binding", original_binding)
+    before = store.path.read_bytes()
+    assert replacement("loopx_operation", inspect, replacement_native)["ok"] is False
+    assert store.path.read_bytes() == before
+    stored = store.load(proposal["proposal_id"])
+    assert stored["operation"]["outcome"] == unknown
+    assert stored["operation"]["reconciliation"] == final
+    assert (
+        stored["operation"]["reconciliation_report"]["owner"]["thread_id"]
+        == "replacement-thread"
+    )
+    assert (
+        stored["normalized_parameters"]["executor"]["session_id"]
+        == "owned-managed-thread"
+    )
+
+
+def test_managed_tool_rejects_actor_injection_native_mismatch_and_revoked_profile(
+    tmp_path: Path,
+) -> None:
+    service, store = _service(tmp_path)
+    handler = _managed_handler(service, store)
+    native = {"thread_id": "owned-managed-thread", "host_turn_id": "native-turn-1"}
+    assert (
+        handler(
+            "loopx_operation", {"action": "context", "actor": EXECUTION_ACTOR}, native
+        )["ok"]
+        is False
+    )
+    assert (
+        handler(
+            "loopx_operation", {"action": "context"}, {**native, "thread_id": "forged"}
+        )["ok"]
+        is False
+    )
+    request = _request()
+    request["normalized_parameters"].pop("executor")
+    request["normalized_parameters"]["projection"]["simulated"] = False
+    prepared = handler(
+        "loopx_operation", {"action": "prepare", "request": request}, native
+    )
+    proposal = prepared["proposal"]
+    delivered = store.record_operation_delivery(
+        proposal["proposal_id"], delivery=_delivery(proposal)
+    )
+    store.decide_operation(
+        proposal["proposal_id"],
+        decision="confirm",
+        confirmation=_confirmation(delivered),
+    )
+    from loopx.control_plane.turn_driver.codex_cli import _store_codex_cli_session
+
+    _store_codex_cli_session(
+        store.root.parent.parent,
+        lineage={
+            "goal_id": GOAL_ID,
+            "agent_id": "finance-fixture-agent",
+            "todo_id": "todo-managed",
+        },
+        session_id="replacement-managed-thread",
+        operation_profile_digest="d" * 64,
+        operation_model="test-model",
+        operation_reasoning_effort="xhigh",
+    )
+    assert (
+        handler(
+            "loopx_operation",
+            {
+                "action": "consume",
+                "proposal_id": proposal["proposal_id"],
+                "consumption_id": "managed-attempt",
+            },
+            native,
+        )["ok"]
+        is False
+    )
+    assert store.load(proposal["proposal_id"])["operation"].get("agent_handoff") is None
+
+
 def _agent_result(
     proposal: dict, consumption_id: str, *, result: str = "executed"
 ) -> dict:
@@ -704,8 +1012,8 @@ def test_recovery_binding_revocation_cannot_split_report_validation_from_commit(
     with ThreadPoolExecutor(max_workers=1) as executor:
         futures = []
 
-        def interleaved_binding(registry_path, parameters):
-            current = original_binding(registry_path, parameters)
+        def interleaved_binding(registry_path, parameters, runtime_root):
+            current = original_binding(registry_path, parameters, runtime_root)
             if parameters["executor"]["thread_id"] == replacement["thread_id"]:
                 futures.append(executor.submit(revoke))
                 assert attempted.wait(5)

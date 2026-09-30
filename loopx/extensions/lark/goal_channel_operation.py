@@ -113,7 +113,10 @@ def _operation_review_frame(proposal: Mapping[str, Any]) -> dict[str, Any]:
 
 def _result_delivery_stage(proposal: Mapping[str, Any]) -> dict[str, str]:
     parameters, operation = _proposal_operation(proposal)
-    if (parameters.get("executor") or {}).get("kind") != "agent_session":
+    if (parameters.get("executor") or {}).get("kind") not in {
+        "agent_session",
+        "managed_turn",
+    }:
         return {}
     return {
         "outcome_stage": "reconciled"
@@ -377,6 +380,8 @@ def build_goal_channel_operation_result_card(
     )
     if pending and frame.get("executionState") == "consumed_outcome_pending":
         result_label = "执行授权已消费，等待真实结果"
+    elif pending and frame.get("executionState") == "managed_turn_pending":
+        result_label = "已确认，等待绑定的受管回合；尚未执行"
     summary = str(frame.get("summary") or result_label)
     return {
         "schema": "2.0",
@@ -673,7 +678,10 @@ def _resolve_operation_executor_binding(
     parameters: Mapping[str, Any], *, runtime_root: Path
 ) -> dict[str, Any]:
     executor = parameters.get("executor")
-    if isinstance(executor, Mapping) and executor.get("kind") == "agent_session":
+    if isinstance(executor, Mapping) and executor.get("kind") in {
+        "agent_session",
+        "managed_turn",
+    }:
         return dict(
             effect_runtime_result(
                 "operation.agent_executor.normalize", {"executor": dict(executor)}
@@ -1056,10 +1064,9 @@ def handle_goal_channel_operation_callback(
         if current is None:
             raise ValueError("claimed operation disappeared before dispatch")
         _parameters, current_operation = _proposal_operation(current)
-        if (
-            current_operation.get("lifecycle_state") == "claimed"
-            and (_parameters.get("executor") or {}).get("kind") == "agent_session"
-        ):
+        if current_operation.get("lifecycle_state") == "claimed" and (
+            _parameters.get("executor") or {}
+        ).get("kind") in {"agent_session", "managed_turn"}:
             # Confirmation exposes an exact canonical continuation in the
             # existing Inbox. No simulator, host resume or financial effect is
             # run in the callback process, and no outcome is manufactured.
