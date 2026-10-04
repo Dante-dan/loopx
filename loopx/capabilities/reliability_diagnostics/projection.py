@@ -9,16 +9,19 @@ from typed event kinds and observed timestamps only.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
 
 from .envelope import (
     CAPABILITY_ID,
     ObserverEnvelope,
+    IDENTITY_TOKEN_PATTERN,
     ObserverEventKind,
     parse_observed_at,
 )
 from .receipt import LedgerReading, build_integrity_receipt
+from .intake import normalize_observer_run_identity
 
 DIAGNOSTIC_PROJECTION_SCHEMA_VERSION = "reliability_diagnostic_projection_v0"
 DEFAULT_STALL_THRESHOLD_MS = 300_000
@@ -190,7 +193,26 @@ def build_diagnostic_projection(
     as_of: str | None = None,
     stall_threshold_ms: int = DEFAULT_STALL_THRESHOLD_MS,
     repetition_threshold: int = DEFAULT_REPETITION_THRESHOLD,
+    expected_binding: Mapping[str, Any] | None = None,
+    max_observation_age_ms: int | None = None,
 ) -> dict[str, Any]:
+    binding = None
+    if expected_binding is not None:
+        fields = {"provider_id", "observer_id", "session_id", "run_identity"}
+        if not isinstance(expected_binding, Mapping) or set(expected_binding) != fields:
+            raise ValueError("expected_binding requires provider_id, observer_id, session_id and run_identity")
+        for key in fields - {"run_identity"}:
+            value = expected_binding[key]
+            if not isinstance(value, str) or not IDENTITY_TOKEN_PATTERN.fullmatch(value):
+                raise ValueError(f"expected_binding.{key} must be an identity token")
+        identity = normalize_observer_run_identity(expected_binding["run_identity"])
+        binding = {**expected_binding, "run_identity": identity.as_dict()}
+        if as_of is None:
+            raise ValueError("expected_binding requires an explicit as_of evaluation time")
+        if isinstance(max_observation_age_ms, bool) or not isinstance(max_observation_age_ms, int) or max_observation_age_ms < 0:
+            raise ValueError("expected_binding requires a non-negative max_observation_age_ms")
+    elif max_observation_age_ms is not None:
+        raise ValueError("max_observation_age_ms requires expected_binding")
     if as_of is not None:
         message = "as_of must be a timezone-aware ISO-8601 timestamp"
         try:
@@ -225,7 +247,7 @@ def build_diagnostic_projection(
         receipt=receipt,
     )
 
-    return {
+    result = {
         "schema_version": DIAGNOSTIC_PROJECTION_SCHEMA_VERSION,
         "capability_id": CAPABILITY_ID,
         "goal_id": reading.goal_id,
@@ -267,3 +289,37 @@ def build_diagnostic_projection(
             "as_of": effective_as_of,
         },
     }
+    if binding is not None:
+        reasons = []
+        if not envelopes:
+            reasons.append("no_observations")
+        if any(
+            item.provider_id != binding["provider_id"]
+            or item.observer_id != binding["observer_id"]
+            or item.session_id != binding["session_id"]
+            for item in envelopes
+        ):
+            reasons.append("session_identity_mismatch")
+        stats = list(reading.stats.values())
+        if len(stats) != 1 or any(
+            item.provider_id != binding["provider_id"]
+            or item.observer_id != binding["observer_id"]
+            or item.run_identity.as_dict() != binding["run_identity"]
+            for item in stats
+        ):
+            reasons.append("run_identity_mismatch")
+        if receipt["status"] != "valid":
+            reasons.append("integrity_not_valid")
+        if last_event_age_ms < 0:
+            reasons.append("observation_in_future")
+        elif last_observed_at and last_event_age_ms > max_observation_age_ms:
+            reasons.append("observation_stale")
+        result["binding"] = {
+            "expected": binding,
+            "eligible": not reasons,
+            "reason_codes": reasons,
+            "max_observation_age_ms": max_observation_age_ms,
+        }
+        if reasons:
+            result["stage"] = DiagnosticStage.UNKNOWN.value
+    return result
