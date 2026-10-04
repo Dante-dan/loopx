@@ -8,8 +8,8 @@ from typed event kinds and observed timestamps only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -310,9 +310,14 @@ def build_diagnostic_projection(
             reasons.append("run_identity_mismatch")
         if receipt["status"] != "valid":
             reasons.append("integrity_not_valid")
-        if last_event_age_ms < 0:
+        # Compare instants; textual timestamp ordering can mix UTC offsets.
+        observation_ages_ms = [
+            (parsed_as_of - parse_observed_at(item.observed_at)).total_seconds() * 1000
+            for item in envelopes
+        ]
+        if any(age < 0 for age in observation_ages_ms):
             reasons.append("observation_in_future")
-        elif last_observed_at and last_event_age_ms > max_observation_age_ms:
+        elif observation_ages_ms and min(observation_ages_ms) > max_observation_age_ms:
             reasons.append("observation_stale")
         result["binding"] = {
             "expected": binding,

@@ -817,6 +817,17 @@ def test_exact_binding_refuses_old_or_future_observations(now, reason):
     assert reason in result["binding"]["reason_codes"]
 
 
+def test_exact_binding_checks_future_instants_across_clock_offsets():
+    result = projection_for(
+        envelope(0, observed_at="2026-09-01T09:30:00-01:00"),
+        envelope(1, observed_at="2026-09-01T10:00:00+00:00"),
+        stats(accepted_event_count=2), expected_binding=expected_binding(),
+        as_of="2026-09-01T10:00:01+00:00", max_observation_age_ms=1000,
+    )
+    assert "observation_in_future" in result["binding"]["reason_codes"]
+    assert result["stage"] == "unknown"
+
+
 def test_exact_binding_cannot_hide_another_session_or_invalid_integrity():
     result = projection_for(envelope(0), envelope(0, session_id="another-session"),
                             stats(accepted_event_count=2), expected_binding=expected_binding(),
