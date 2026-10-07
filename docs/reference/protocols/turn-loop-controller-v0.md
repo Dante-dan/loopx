@@ -209,6 +209,18 @@ is reached. A stored recovery audit describes an earlier attempt, not current
 eligibility. The eventual `run-once` still revalidates host-session binding and
 execution authority before retrying.
 
+## Quota settlement CAS recovery
+
+A quota run-index CAS rejection is finalized as `quota_spend_failed`, retaining
+the completed host, validation and durable-writeback receipt prefix and its
+lineage. The existing spend resolver first checks the stable effect: committed
+spends are checkpointed without replay, confirmed absence records rejection,
+and unknown outcomes retain the prepared effect for readback. The controller
+still routes this failed settlement to `repair`; it grants no automatic retry.
+The outer caller/operator may retry the same Turn with `--resume-turn-key` and
+`--retry-failed-turn` after repairing the settlement condition. The CLI collects
+a fresh quota decision for that attempt and preserves the completed work.
+
 ## Boundary
 
 The controller is a pure function. It must not invoke a model, sleep, mutate a

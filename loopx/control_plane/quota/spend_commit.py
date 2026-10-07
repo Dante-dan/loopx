@@ -22,6 +22,14 @@ QUOTA_SPEND_COMMIT_REQUEST_SCHEMA = "loopx_quota_spend_commit_request_v0"
 QUOTA_SPEND_COMMIT_RESULT_SCHEMA = "loopx_quota_spend_commit_result_v0"
 
 
+class QuotaSpendIndexConflict(ValueError):
+    """The native spend transaction rejected its observed run-index basis.
+
+    This does not prove the effect is absent: an older indexed effect may lack
+    a transaction receipt. Turn callers must resolve the stable effect first.
+    """
+
+
 def quota_spend_index_digest(index_path: Path) -> str | None:
     try:
         content = index_path.read_bytes()
@@ -110,6 +118,8 @@ def _quota_spend_commit_result(
     ):
         raise RuntimeError("TypeScript quota spend commit result shape mismatch")
     if result.get("status") == "conflict":
+        if result.get("reason_code") == "index_digest_conflict":
+            raise QuotaSpendIndexConflict(str(result.get("reason")))
         raise ValueError(str(result.get("reason") or "quota spend commit conflict"))
     return result
 

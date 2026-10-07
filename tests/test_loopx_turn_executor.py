@@ -3764,6 +3764,216 @@ def test_budget_rejection_is_typed_and_retry_does_not_repeat_writeback(
     assert calls == {"host": 1, "writeback": 1, "spend": 2}
 
 
+@pytest.mark.parametrize("result_kind", ["validated_progress", "validated_completion"])
+def test_quota_index_cas_failure_is_auditable_and_retry_preserves_work(
+    tmp_path: Path,
+    result_kind: str,
+) -> None:
+    from loopx.control_plane.quota.spend_commit import (
+        quota_spend_index_digest,
+        replay_quota_spend_by_effect_ref,
+    )
+    from loopx.control_plane.testing.quota_fixtures import (
+        quota_status_payload,
+        quota_todo_item,
+    )
+    from loopx.quota import spend_quota_slot
+
+    plan = _plan()
+    runtime_root = tmp_path / "runtime"
+    index_path = runtime_root / "goals" / "fixture-goal" / "runs" / "index.jsonl"
+    calls = {"host": 0, "writeback": 0, "spend": 0, "terminal": 0}
+    bases: list[str | None] = []
+
+    def spend(*, effect_ref: str) -> dict[str, object]:
+        calls["spend"] += 1
+        basis = quota_spend_index_digest(index_path)
+        bases.append(basis)
+        todo = quota_todo_item(
+            todo_id="todo_fixture0001",
+            title="Advance a fixture",
+            claimed_by="codex-fixture",
+        )
+        status = quota_status_payload(
+            goal_id="fixture-goal",
+            status="active",
+            agent_todo_items=[todo],
+            recommended_action=todo["text"],
+            quota_extra={"spent_slots": calls["spend"] - 1},
+            coordination={
+                "agent_model": "peer_v1",
+                "registered_agents": ["codex-fixture"],
+            },
+        )
+        status["runtime_root"] = str(runtime_root)
+        status["run_history"]["goals"][0]["index_digest"] = basis
+        if calls["spend"] == 1:
+            # A real competing transaction commits after this status snapshot.
+            competing = spend_quota_slot(
+                status,
+                goal_id="fixture-goal",
+                execute=True,
+                source="controller",
+                agent_id="codex-fixture",
+                effect_ref="competing-effect#quota_spend",
+            )
+            assert competing["appended"] is True
+        return spend_quota_slot(
+            status,
+            goal_id="fixture-goal",
+            execute=True,
+            source="controller",
+            agent_id="codex-fixture",
+            effect_ref=effect_ref,
+        )
+
+    def resolve(effect_ref: str) -> dict[str, object]:
+        payload = replay_quota_spend_by_effect_ref(
+            runtime_root,
+            goal_id="fixture-goal",
+            effect_ref=effect_ref,
+            agent_id="codex-fixture",
+            read_only=True,
+        )
+        return (
+            {"kind": "committed", "payload": payload}
+            if payload.get("ok")
+            else {"kind": "absent"}
+        )
+
+    def host(_request: dict[str, object]) -> dict[str, object]:
+        calls["host"] += 1
+        return _host_result(plan, kind=result_kind)
+
+    def writeback(_result: dict[str, object]) -> dict[str, object]:
+        calls["writeback"] += 1
+        return {"ok": True, "appended": True}
+
+    def terminal(_result: dict[str, object]) -> dict[str, object]:
+        calls["terminal"] += 1
+        return {
+            "ok": True,
+            "appended": True,
+            "completion": {
+                "todo_id": "todo_fixture0001",
+                "continuation": "no_followup",
+            },
+        }
+
+    common = dict(
+        host_runner=host,
+        project=tmp_path,
+        runtime_root=runtime_root,
+        goal_id="fixture-goal",
+        timeout_seconds=5,
+        execute=True,
+        task_validator=_passing_validator,
+        writeback=writeback,
+        spend=spend,
+        spend_resolver=resolve,
+        scheduler=lambda _spend: {"completed": True, "acknowledged": True},
+        completion_writeback=writeback,
+        terminal_closeout=terminal,
+        completion_intent=lambda _result: {
+            "todo_id": "todo_fixture0001",
+            "continuation": "no_followup",
+        },
+    )
+    failed = run_loopx_turn_once(plan, **common)
+    assert failed["status"] == "failed"
+    assert failed["result_kind"] == "quota_spend_failed"
+    assert failed["receipt"]["failed_phase"] == "quota_spend"
+    assert failed["receipt"]["lineage"]["agent_id"] == "codex-fixture"
+    assert failed["receipt"]["completed_phases"] == [
+        "host_execute",
+        "typed_result",
+        "validation",
+        "durable_writeback",
+    ]
+    assert "effect_attempts" not in _journal(runtime_root)
+    assert calls == {"host": 1, "writeback": 1, "spend": 1, "terminal": 0}
+    assert run_loopx_turn_once(plan, **common)["replayed"] is True
+
+    recovered = run_loopx_turn_once(plan, retry_failed=True, **common)
+    assert recovered["status"] == "committed"
+    assert bases[0] is None and bases[1] is not None
+    assert calls == {
+        "host": 1,
+        "writeback": 1,
+        "spend": 2,
+        "terminal": int(result_kind == "validated_completion"),
+    }
+    assert len(index_path.read_text(encoding="utf-8").splitlines()) == 2
+    assert run_loopx_turn_once(plan, **common)["replayed"] is True
+    assert len(index_path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+@pytest.mark.parametrize("readback", ["committed", "unknown"])
+def test_quota_cas_failure_requires_effect_readback_before_reexecution(
+    tmp_path: Path,
+    readback: str,
+) -> None:
+    from loopx.control_plane.quota.spend_commit import QuotaSpendIndexConflict
+
+    plan = _plan()
+    calls = {"spend": 0}
+
+    def spend(*, effect_ref: str) -> dict[str, object]:
+        calls["spend"] += 1
+        raise QuotaSpendIndexConflict(
+            "quota run index compare-and-swap precondition failed"
+        )
+
+    def resolve(effect_ref: str) -> dict[str, object]:
+        return (
+            {
+                "kind": "committed",
+                "payload": {
+                    "ok": True,
+                    "appended": True,
+                    "effect_ref": effect_ref,
+                },
+            }
+            if readback == "committed"
+            else {"kind": "unknown"}
+        )
+
+    common = dict(
+        host_runner=lambda _request: _host_result(plan),
+        project=tmp_path,
+        runtime_root=tmp_path / "runtime",
+        goal_id="fixture-goal",
+        timeout_seconds=5,
+        execute=True,
+        task_validator=_passing_validator,
+        writeback=lambda _result: {"ok": True, "appended": True},
+        spend=spend,
+        scheduler=lambda _spend: {"completed": True, "acknowledged": True},
+    )
+    payload = run_loopx_turn_once(plan, spend_resolver=resolve, **common)
+    assert calls["spend"] == 1
+    assert payload["status"] == ("committed" if readback == "committed" else "failed")
+    journal = _journal(tmp_path / "runtime")
+    if readback == "unknown":
+        assert (
+            payload["settlement_result"]["failure"]["kind"] == "effect_outcome_unknown"
+        )
+        assert journal["effect_attempts"]["quota_spend"]["status"] == "prepared"
+        recovered = run_loopx_turn_once(
+            plan,
+            retry_failed=True,
+            spend_resolver=lambda effect_ref: {
+                "kind": "committed",
+                "payload": {"ok": True, "appended": True, "effect_ref": effect_ref},
+            },
+            **common,
+        )
+        assert recovered["status"] == "committed"
+        assert calls["spend"] == 1
+    else:
+        assert "effect_attempts" not in journal
+
+
 def test_run_once_fails_closed_without_independent_task_validator(
     tmp_path: Path,
 ) -> None:

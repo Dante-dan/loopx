@@ -18,6 +18,7 @@ from ..effect_runtime import effect_runtime_result
 from ..goals.source_session_turn_effects import (
     SOURCE_TURN_EFFECT_HOLD_SCHEMA_VERSION,
 )
+from ..quota.spend_commit import QuotaSpendIndexConflict
 from ..settlement_driver import decode_settlement_result
 from .driver import selected_turn_todo
 from .transaction import (
@@ -569,9 +570,30 @@ def execute_turn_driver_settlement(
                 )
                 if provider is None:
                     raise ValueError("terminal closeout requires an effect provider")
+                try:
+                    provider_payload = dict(_invoke_turn_effect(provider, effect_ref))
+                except QuotaSpendIndexConflict as exc:
+                    if step_kind is not SettlementStepKind.QUOTA_SPEND:
+                        raise
+                    observation = _read_prepared_effect(resolvers, step_kind, effect_ref)
+                    if (
+                        observation.get("kind") != "absent"
+                        or observation.get("payload") is not None
+                    ):
+                        # Committed readback checkpoints without re-execution;
+                        # unknown readback fails with the prepared effect intact.
+                        observations[step_kind.value] = observation
+                        returned_attempt = None
+                        continue
+                    provider_payload = {
+                        "ok": False,
+                        "appended": False,
+                        "effect_ref": effect_ref,
+                        "reason": str(exc),
+                    }
                 returned_attempt = {
                     "step_kind": step_kind.value,
-                    "payload": dict(_invoke_turn_effect(provider, effect_ref)),
+                    "payload": provider_payload,
                 }
                 observations.pop(step_kind.value, None)
                 continue
