@@ -94,7 +94,10 @@ must stay out of public contributions:
 Safe contribution surfaces include docs, examples, smoke tests, CLI diagnostics,
 schema docs, dashboard UI code, and sanitized fixtures.
 
-Run the public/private scan before sending docs or examples:
+Run the public/private scan before sending docs or examples.
+An unlistable scan root or descendant is an incomplete scan: `loopx check`
+reports the directory and listing error and exits non-zero. Intentionally
+pruned dependency directories remain outside the scan.
 
 ```bash
 loopx check \

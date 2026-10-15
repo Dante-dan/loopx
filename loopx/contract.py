@@ -4,7 +4,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -866,7 +866,9 @@ def _tracked_scan_files(scan_root: Path) -> list[Path]:
     return files
 
 
-def iter_scan_files(scan_root: Path) -> list[Path]:
+def iter_scan_files(
+    scan_root: Path, *, onerror: Callable[[OSError], None] | None = None
+) -> list[Path]:
     scan_root = scan_root.resolve()
     if scan_root.is_file():
         return [scan_root]
@@ -880,7 +882,7 @@ def iter_scan_files(scan_root: Path) -> list[Path]:
     ):
         return sorted(tracked_files)
 
-    for dir_path, dir_names, file_names in os.walk(scan_root):
+    for dir_path, dir_names, file_names in os.walk(scan_root, onerror=onerror):
         current_dir = Path(dir_path)
         dir_names[:] = [
             name
@@ -913,6 +915,7 @@ def scan_public_boundary(
     credential_reference_hits: list[str] = []
     unreadable_files: list[str] = []
     missing_scan_roots: list[str] = []
+    unreadable_directories: list[str] = []
     files: list[Path] = []
     file_roots: dict[Path, Path] = {}
     private_files: set[Path] = set()
@@ -932,7 +935,13 @@ def scan_public_boundary(
             classification_root = (
                 _git_worktree_root(resolved_scan_root) or Path(resolved_scan_root.anchor)
             )
-        for file_path in iter_scan_files(resolved_scan_root):
+        def record_directory_error(error: OSError) -> None:
+            directory = Path(error.filename) if error.filename else resolved_scan_root
+            unreadable_directories.append(
+                f"{rel_or_abs(directory, display_root)}: {error.strerror or error}"
+            )
+
+        for file_path in iter_scan_files(resolved_scan_root, onerror=record_directory_error):
             files.append(file_path)
             if _is_local_private_state_path(file_path, classification_root):
                 private_files.add(file_path)
@@ -1028,7 +1037,7 @@ def scan_public_boundary(
                     else:
                         hits.append(hit)
     return {
-        "ok": not hits,
+        "ok": not hits and not unreadable_directories,
         "scan_roots": [str(path) for path in scan_roots],
         "files": len(files),
         "scanned_files": len(files) - len(skipped_private_state_files),
@@ -1036,6 +1045,7 @@ def scan_public_boundary(
         "credential_reference_hits": credential_reference_hits,
         "unreadable_files": unreadable_files,
         "missing_scan_roots": missing_scan_roots,
+        "unreadable_directories": unreadable_directories,
         "allowed_hits": allowed_hits,
         "private_state_git_warnings": private_state_git_warnings,
         "policy": policy,
@@ -1203,16 +1213,23 @@ def check_contract(
     if include_public_boundary_scan:
         boundary = scan_public_boundary(scan_roots, registry=registry)
         missing_scan_roots = [str(item) for item in boundary.get("missing_scan_roots") or []]
+        unreadable_directories = [str(item) for item in boundary.get("unreadable_directories") or []]
         public_boundary_scan = {
             "state": "completed",
             "ok": bool(boundary.get("ok")) and not missing_scan_roots,
             "scanned_files": int(boundary.get("scanned_files") or 0),
             "missing_scan_roots": missing_scan_roots,
+            "unreadable_directories": unreadable_directories,
         }
         for missing_root in missing_scan_roots:
             add_global_error(
                 "public_boundary_scan_root_missing",
                 f"scan root does not exist: {missing_root}",
+            )
+        for directory_error in unreadable_directories:
+            add_global_error(
+                "public_boundary_directory_unreadable",
+                f"directory could not be listed: {directory_error}",
             )
         if boundary.get("ok") and not missing_scan_roots:
             checks.append(f"public boundary scan clean: {boundary.get('scanned_files')} files")
