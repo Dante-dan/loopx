@@ -144,6 +144,7 @@ function classMatch(
   pattern: string,
   start: number,
   value: string,
+  ignoreCase = false,
 ): { end: number; matches: boolean } | null {
   const end = characterClassEnd(pattern, start);
   if (end < 0) return null;
@@ -151,18 +152,19 @@ function classMatch(
   const negated = body.startsWith("!");
   if (negated) body = body.slice(1);
   let matches = false;
+  const values = ignoreCase ? [value, value.toLowerCase(), value.toUpperCase()] : [value];
   for (let index = 0; index < body.length; index += 1) {
     if (index + 2 < body.length && body[index + 1] === "-") {
-      if (body[index] <= value && value <= body[index + 2]) matches = true;
+      if (values.some(candidate => body[index] <= candidate && candidate <= body[index + 2])) matches = true;
       index += 2;
-    } else if (body[index] === value) {
+    } else if (values.includes(body[index])) {
       matches = true;
     }
   }
   return { end, matches: negated ? !matches : matches };
 }
 
-function fnmatchcase(value: string, pattern: string): boolean {
+function fnmatchcase(value: string, pattern: string, ignoreCase = false): boolean {
   const memo = new Map<string, boolean>();
   const match = (valueIndex: number, patternIndex: number): boolean => {
     const key = `${valueIndex}:${patternIndex}`;
@@ -179,12 +181,12 @@ function fnmatchcase(value: string, pattern: string): boolean {
     } else if (pattern[patternIndex] === "?") {
       result = match(valueIndex + 1, patternIndex + 1);
     } else if (pattern[patternIndex] === "[") {
-      const characterClass = classMatch(pattern, patternIndex, value[valueIndex]);
+      const characterClass = classMatch(pattern, patternIndex, value[valueIndex], ignoreCase);
       result = characterClass === null
         ? value[valueIndex] === "[" && match(valueIndex + 1, patternIndex + 1)
         : characterClass.matches && match(valueIndex + 1, characterClass.end + 1);
     } else {
-      result = value[valueIndex] === pattern[patternIndex] &&
+      result = value[valueIndex] === (ignoreCase ? pattern[patternIndex].toLowerCase() : pattern[patternIndex]) &&
         match(valueIndex + 1, patternIndex + 1);
     }
     memo.set(key, result);
@@ -200,7 +202,12 @@ function scopeLiteralPrefix(scope: string): string {
   return indexes.length > 0 ? scope.slice(0, Math.min(...indexes)) : scope;
 }
 
-function scopePairOverlaps(left: string, right: string): boolean {
+function scopePairOverlaps(left: string, right: string, ignoreCase = false): boolean {
+  const leftPattern = left, rightPattern = right;
+  if (ignoreCase) {
+    left = left.toLowerCase();
+    right = right.toLowerCase();
+  }
   if (left === right) return true;
   if (["*", "**", "./"].includes(left) || ["*", "**", "./"].includes(right)) {
     return true;
@@ -209,12 +216,12 @@ function scopePairOverlaps(left: string, right: string): boolean {
   const rightGlob = ["*", "?", "["].some((token) => right.includes(token));
   if (leftGlob && !rightGlob) {
     const prefix = scopeLiteralPrefix(left);
-    return fnmatchcase(right, left) ||
+    return fnmatchcase(right, leftPattern, ignoreCase) ||
       (prefix.endsWith("/") && right.replace(/\/$/u, "") === prefix.replace(/\/$/u, ""));
   }
   if (rightGlob && !leftGlob) {
     const prefix = scopeLiteralPrefix(right);
-    return fnmatchcase(left, right) ||
+    return fnmatchcase(left, rightPattern, ignoreCase) ||
       (prefix.endsWith("/") && left.replace(/\/$/u, "") === prefix.replace(/\/$/u, ""));
   }
   if (leftGlob && rightGlob) {
@@ -231,8 +238,15 @@ function scopePairOverlaps(left: string, right: string): boolean {
 
 function writeScopesOverlap(left: readonly string[], right: readonly string[]): boolean {
   if (left.length === 0 || right.length === 0) return false;
+  // Case aliases share the exclusive grant, regardless of the admitting host.
+  // Fold only this comparison view: canonical scopes also feed retained lease
+  // spelling and immutable acquisition/replay identity.
   const a = comparisonWriteScopes(left), b = comparisonWriteScopes(right);
-  return a.some((first) => b.some((second) => scopePairOverlaps(first, second)));
+  return a.some((first) => b.some((second) =>
+    // Preserve existing coverage, including case-sensitive negated classes.
+    // Case-insensitive matching keeps original ranges such as [A-z] intact.
+    scopePairOverlaps(first, second) ||
+    scopePairOverlaps(first, second, true)));
 }
 
 function decisionStringArray(value: unknown, label: string): string[] {

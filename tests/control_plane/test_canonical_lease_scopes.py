@@ -112,3 +112,27 @@ def test_glob_class_members_keep_exclusive_scope_coverage(scope_goal, scope, tar
     rejected = cli("task-lease", "acquire", "--todo-id", "todo_scope_b", "--owner", "agent-b",
         "--idempotency-key", "class-b", "--write-scope", target, "--expected-version", "0", expected_exit=1)
     assert rejected["error_code"] == "write_scope_conflict" and current() == before
+
+
+@pytest.mark.parametrize("command", ["acquire", "claim"])
+def test_case_alias_conflict_preserves_provider_and_request_identity(scope_goal, command):
+    cli, current = scope_goal
+    acquire = ("task-lease", "acquire", "--todo-id", "todo_scope_b", "--owner", "agent-b",
+        "--idempotency-key", "case-b", "--write-scope", "SRC/Main.ts", "--expected-version", "0")
+    first = cli(*acquire)
+    assert first["lease"]["write_scopes"] == ["SRC/Main.ts"]
+    before = current()
+    replay = cli(*acquire)
+    assert replay["original_receipt"] == first["original_receipt"] and current() == before
+    rejected = cli(*acquire[:-3], "src/main.ts", *acquire[-2:], expected_exit=1)
+    assert rejected["error_code"] == "coordination_operation_identity_mismatch" and current() == before
+    if command == "acquire":
+        rejected = cli("task-lease", "acquire", "--todo-id", "todo_scope_a", "--owner", "agent-a",
+            "--idempotency-key", "case-a", "--write-scope", "src/main.ts", "--expected-version", "0",
+            expected_exit=1)
+    else:
+        rejected = cli("todo", "claim", "--todo-id", "todo_scope_a", "--claimed-by", "agent-a",
+            "--agent-id", "agent-a", "--claim-operation-id", "case-claim",
+            "--task-lease-idempotency-key", "case-claim", "--task-lease-expected-version", "0",
+            expected_exit=1)
+    assert rejected["error_code"] == "write_scope_conflict" and current() == before

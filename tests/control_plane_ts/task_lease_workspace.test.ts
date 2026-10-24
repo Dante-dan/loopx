@@ -270,6 +270,31 @@ test("scope comparison canonicalizes aliases while request identity keeps its sp
     true,
   );
 });
+test("case aliases overlap without changing canonical scope spelling", () => {
+  for (const [left, right] of [
+    ["src/Main.ts", "src/main.ts"],
+    ["SRC/", "src/main.ts"],
+    ["SRC/**", "src/main.ts"],
+    ["src/[A-Z]ain.ts", "SRC/main.ts"],
+    ["SRC/*.ts", "src/main.*"],
+    ["./SRC//Main.ts", "src/./main.ts"],
+    ["SRC/[A-z].ts", "src/_.ts"],
+  ]) {
+    assert.equal(evaluateTaskLeaseWriteScopesOverlap({left: [left], right: [right]}).overlap, true);
+    assert.equal(evaluateTaskLeaseWriteScopesOverlap({left: [right], right: [left]}).overlap, true);
+  }
+  assert.equal(evaluateTaskLeaseWriteScopesOverlap({left: ["SRC/Main.ts"], right: ["src/other.ts"]}).overlap, false);
+  assert.equal(evaluateTaskLeaseWriteScopesOverlap({left: ["SRC/[!A-Z].ts"], right: ["src/a.ts"]}).overlap, false);
+  assert.deepEqual(normalizeWriteScopes(["src/Main.ts", "src/main.ts"]), ["src/Main.ts", "src/main.ts"]);
+  assert.deepEqual(comparisonWriteScopes(["src/Main.ts", "src/main.ts"]), ["src/Main.ts", "src/main.ts"]);
+  const input = request(workspace);
+  input.command.write_scopes = ["src/Main.ts"];
+  input.other_leases[0].write_scopes = ["SRC/main.ts"];
+  assert.equal(evaluateTaskLeaseAcquireDecision(input).code, "write_scope_conflict");
+  const admitted = evaluateTaskLeaseAcquireDecision({...input, other_leases: []});
+  assert.deepEqual(admitted.next_lease?.write_scopes, ["src/Main.ts"]);
+});
+
 test("scope comparison and matching share literal right-bracket character classes", () => {
   for (const [scope, target] of [
     ["src/[]/./]x", "src/.x"],
