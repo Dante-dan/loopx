@@ -5,6 +5,7 @@ of a live Agent's report or a natural production deadline.
 """
 from datetime import datetime, timedelta
 import inspect
+import hashlib
 import json
 from pathlib import Path
 
@@ -333,7 +334,10 @@ def test_original_due_report_freezes_once_and_returns_full_body_after_native_set
     assert transport.steward_reports.reconcile() == 1
     cursor = read_periodic_report_publication_cursor(runtime_root=reports.root, goal_id=actor["goal_id"], agent_id=actor["agent_id"])
     assert cursor["generation_id"] == generation["generation_id"] and cursor["covered_until"] == window["due_at"]
-    body = (folder / "report.md").read_text()
+    body_bytes = (folder / "report.md").read_bytes()
+    body = body_bytes.decode("utf-8")
+    assert b"\r\n" not in body_bytes
+    assert generation["body_sha256"] == hashlib.sha256(body_bytes).hexdigest()
     assert done["response"]["message"] == body and "全景判断" in body and "重点因果下钻" in body
     delivery = json.loads((folder / "private-delivery.json").read_text())
     assert delivery["delivery_status"] == "delivered"
