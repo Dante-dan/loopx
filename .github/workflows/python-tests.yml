@@ -804,6 +804,13 @@ jobs:
           python -m pytest -q
           tests/canary/test_repository_root.py::test_plan_renders_repository_paths_in_canonical_posix_form
 
+      - name: Qualify owned CLI budget fixture paths on native Windows
+        run: >-
+          python -m pytest -q
+          tests/control_plane/test_cli_output_budget.py::test_stable_budget_fixture_uses_an_owned_physical_short_root
+          tests/control_plane/test_cli_output_budget.py::test_stable_budget_fixture_preserves_an_existing_directory
+          tests/control_plane/test_cli_output_probe_runner.py::test_runner_replaces_historical_fixture_lifecycle
+
       - name: Qualify the canary premerge contract smoke on native Windows
         run: python examples/canary/premerge-validation-gate-smoke.py
 

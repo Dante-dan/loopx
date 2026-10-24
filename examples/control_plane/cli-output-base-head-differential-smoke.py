@@ -25,6 +25,7 @@ from loopx.control_plane.testing.cli_output_differential import (  # noqa: E402
 
 PROBE_TEST = REPO_ROOT / "tests" / "control_plane" / "test_cli_output_budget.py"
 PROBE_RUNNER = REPO_ROOT / "examples" / "control_plane" / "cli-output-probe-runner.py"
+FIXTURE_SOURCE = REPO_ROOT / "tests" / "control_plane" / "cli_output_fixture.py"
 SEMANTICS_SOURCE = (
     REPO_ROOT / "loopx" / "control_plane" / "testing" / "cli_output_semantics.py"
 )
@@ -55,6 +56,7 @@ def _run_probe(
     probe_runner: Path,
     probe_test: Path,
     semantics_source: Path,
+    fixture_source: Path,
     fixture_root: Path,
     receipt_path: Path,
     cwd: Path,
@@ -80,6 +82,8 @@ def _run_probe(
             str(probe_test),
             "--semantics-source",
             str(semantics_source),
+            "--fixture-source",
+            str(fixture_source),
             "--fixture-root",
             str(fixture_root),
             "--receipt",
@@ -152,11 +156,13 @@ def main() -> int:
         base_root = temp_root / "base"
         probe_runner = temp_root / "cli_output_probe_runner.py"
         semantics_source = temp_root / "cli_output_semantics.py"
+        fixture_source = temp_root / "cli_output_fixture.py"
         fixture_root = temp_root / "public-fixture"
         base_receipt = temp_root / "base-receipt.json"
         candidate_receipt = temp_root / "candidate-receipt.json"
         shutil.copy2(PROBE_RUNNER, probe_runner)
         shutil.copy2(SEMANTICS_SOURCE, semantics_source)
+        shutil.copy2(FIXTURE_SOURCE, fixture_source)
 
         _run(
             [
@@ -183,6 +189,7 @@ def main() -> int:
                 probe_runner=probe_runner,
                 probe_test=base_probe_test,
                 semantics_source=semantics_source,
+                fixture_source=fixture_source,
                 fixture_root=fixture_root,
                 receipt_path=base_receipt,
                 cwd=temp_root,
@@ -193,6 +200,7 @@ def main() -> int:
                 probe_runner=probe_runner,
                 probe_test=PROBE_TEST,
                 semantics_source=semantics_source,
+                fixture_source=fixture_source,
                 fixture_root=fixture_root,
                 receipt_path=candidate_receipt,
                 cwd=temp_root,

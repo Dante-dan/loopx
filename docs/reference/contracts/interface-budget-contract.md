@@ -554,3 +554,30 @@ characters once. Missing clauses, unrelated surfaces and later new→new growth
 retain ordinary gates. This is cost attribution, not admission logic or proof of
 semantic equivalence. The PR's clause review and current-path validation remain
 necessary; deleting an obligation cannot earn this allowance.
+
+### Native fixture lifecycle / 原生夹具生命周期
+
+The real-output budget tests and base/head probe share one physical fixture
+lifecycle. POSIX retains the characterized `/tmp/loopx-cli-budget-<digest>`
+layout; native Windows uses the platform temporary directory as the parent,
+without creating a drive-root `tmp` directory. Existing fixture entries are
+never replaced; only the directory created by the lifecycle is cleaned up.
+The candidate harness supplies that same lifecycle to historical base probes,
+while each revision retains its own runtime and fixture workload. The caller's
+fixture seed path is not a directory the probe may delete.
+
+This portability repair does not qualify Windows output ceilings. Native
+absolute paths and shell quoting remain part of unmodified measured stdout;
+longer paths can still fail the existing ceilings. Native full-matrix and
+long-path qualification remains required before proposing a budget adjustment
+(see #6809). No production text or budget is shortened or relaxed here.
+
+真实输出预算测试与 base/head probe 共享物理夹具生命周期。POSIX 保留已定性的
+`/tmp/loopx-cli-budget-<digest>` 路径；原生 Windows 使用系统临时目录作为父目录，
+不创建盘符根目录下的 `tmp`。已有夹具不被替换，仅清理由本次生命周期创建的目录。
+候选 harness 向历史 base probe 提供同一生命周期，各版本仍使用自己的 runtime
+与夹具工作负载。调用者传入的夹具 seed 路径不授予 probe 删除该目录的权限。
+
+此可移植性修复不代表 Windows 输出预算已通过资格化。原生绝对路径与 shell 引用
+仍完整计入 stdout；更长路径仍可能超过现有上限。任何预算调整前仍须完成原生
+全矩阵及长路径资格化（见 #6809），本次不缩短产品文字或放宽预算。

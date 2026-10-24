@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import runpy
 import re
 from pathlib import Path
@@ -74,7 +76,7 @@ def test_runner_uses_the_pytest_scenario_alias_without_rewriting_stdout(
 
     assert len(rows) == len(emitted) == len(fixture_roots) == 1
     root = fixture_roots[0]
-    assert root.parent == Path("/tmp")
+    assert root.parent == (Path(tempfile.gettempdir()) if os.name == "nt" else Path("/tmp"))
     assert root.name.startswith("loopx-cli-budget-")
     assert len(root.name.removeprefix("loopx-cli-budget-")) == 12
     assert not root.exists()  # The shared context cleans up its alias.
@@ -103,3 +105,22 @@ def test_runner_still_rejects_actual_stdout_growth(
     ceiling = probe.CLI_OUTPUT_BUDGET_BY_ID["loopx_turn_plan"].max_chars["crowded"]["json"]
     with pytest.raises(AssertionError, match=re.escape(f"baseline ceiling is {ceiling}")):
         crowded_turn_probe(probe, cli_output_semantics, tmp_path / "growth")
+
+
+def test_runner_replaces_historical_fixture_lifecycle(tmp_path: Path) -> None:
+    from types import ModuleType
+
+    historical = ModuleType("historical_probe")
+
+    def retired_fixture(_root):
+        raise AssertionError("historical /tmp lifecycle must not run")
+
+    historical._stable_budget_fixture_root = retired_fixture
+    runner = runpy.run_path(str(RUNNER))
+    runner["_install_fixture_lifecycle"](
+        historical, Path(probe.__file__).with_name("cli_output_fixture.py")
+    )
+    with historical._stable_budget_fixture_root(tmp_path / "historical") as root:
+        assert root.parent == (Path(tempfile.gettempdir()) if os.name == "nt" else Path("/tmp"))
+        assert root.is_dir() and not root.is_symlink()
+    assert not root.exists()

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import shutil
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -39,6 +38,12 @@ def _load_module(name: str, path: Path) -> ModuleType:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _install_fixture_lifecycle(probe: ModuleType, fixture_source: Path) -> None:
+    fixture = _load_module("loopx_cli_output_probe_lifecycle", fixture_source)
+    # Both revisions use the candidate harness lifecycle, including retired bases.
+    probe._stable_budget_fixture_root = fixture.stable_budget_fixture_root
 
 
 def _receipt_row(
@@ -422,6 +427,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--test-source", type=Path, required=True)
     parser.add_argument("--semantics-source", type=Path, required=True)
+    parser.add_argument("--fixture-source", type=Path, required=True)
     parser.add_argument("--fixture-root", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument(
@@ -433,9 +439,7 @@ def main() -> int:
     _install_pytest_import_stub()
     probe = _load_module("loopx_cli_output_probe_fixture", args.test_source)
     semantics = _load_module("loopx_cli_output_probe_semantics", args.semantics_source)
-    if args.fixture_root.exists():
-        shutil.rmtree(args.fixture_root)
-    args.fixture_root.mkdir(parents=True)
+    _install_fixture_lifecycle(probe, args.fixture_source)
     with probe._stable_budget_fixture_root(args.fixture_root) as stable_root:
         rows = [
             *_default_rows(
