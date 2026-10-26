@@ -74,6 +74,14 @@ try {
   if (process.env.LOOPX_RUNTIME_READER_BEFORE === "1") {
     await page.screenshot({path:resolve(output,"before-desktop.png")});
   } else {
+    const readOnlyNotice = page.locator(".personal-read-only-notice");
+    await readOnlyNotice.locator(":scope > strong").filter({hasText:"只读来源"}).waitFor();
+    assert.doesNotMatch(await readOnlyNotice.innerText(), /你可以查看/, "The permission state stays visible without a default explanation paragraph");
+    await readOnlyNotice.getByRole("button", {name:"只读来源",exact:true}).focus();
+    const explanation = page.locator(".context-help-popover:popover-open").filter({hasText:"写入、纠偏和 Agent 会话仍留在来源主机"});
+    await explanation.waitFor();
+    await page.keyboard.press("Escape");
+    await explanation.waitFor({state:"hidden"});
     const initialRead = new Promise(resolve => {readStarted = resolve;});
     await page.locator(".personal-goal-tabs").getByRole("button", {name:"研究", exact:true}).click();
     await initialRead;

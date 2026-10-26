@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -500,6 +502,184 @@ def _install_automation(
         f'prompt = "Advance `{goal_id}` from active state. Agent: `{agent_id}`."\n',
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize("selection", ["configured", "sibling", "explicit"])
+def test_aliased_homes_preserve_one_installed_heartbeat_cadence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest,
+    selection: str,
+) -> None:
+    home = CodexHome(tmp_path / ".codex")
+    alias = tmp_path / ".codex-alias"
+    if os.name == "nt":
+        created = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(home.root)],
+            capture_output=True,
+        )
+        assert created.returncode == 0, created.stderr or created.stdout
+        request.addfinalizer(alias.rmdir)
+    else:
+        alias.symlink_to(home.root, target_is_directory=True)
+    other = CodexHome(tmp_path / ".codex-other")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("LOOPX_CODEX_HOMES", raising=False)
+    first = home.root
+    if selection == "configured":
+        monkeypatch.setenv("CODEX_HOME", str(alias))
+        first = alias
+    elif selection == "explicit":
+        monkeypatch.setenv(
+            "LOOPX_CODEX_HOMES", os.pathsep.join(map(str, [alias, home.root, other.root]))
+        )
+        first = alias
+    _install_automation(
+        home, automation_id="one", goal_id="bound", agent_id="a",
+        rrule="FREQ=MINUTELY;INTERVAL=5",
+    )
+    lane = HostDeliveryScope(
+        goal_id="bound", agent_id="a", host_surface="codex-app", thread_id="t-open"
+    )
+    reads: list[Path] = []
+    read_text = Path.read_text
+
+    def record_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path.name == "automation.toml":
+            reads.append(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", record_read)
+
+    assert codex_delivery_expectations([lane]) == {
+        lane: HostDeliveryExpectation(
+            expected_interval_minutes=5, source="codex_app_automation_rrule"
+        )
+    }
+    assert reads == [first / "automations" / "one" / "automation.toml"]
+    logical_homes = [home.root, alias, other.root] if selection == "sibling" else [alias, home.root, other.root]
+    assert codex_homes() == logical_homes
+    # Explicit reader inputs receive the same physical-store protection.
+    assert codex_delivery_expectations([lane], homes=logical_homes)[lane].expected_interval_minutes == 5
+    # Two distinct automations remain ambiguous even when their home has aliases.
+    _install_automation(
+        home, automation_id="two", goal_id="bound", agent_id="a",
+        rrule="FREQ=MINUTELY;INTERVAL=9",
+    )
+    assert codex_delivery_expectations([lane]) == {}
+    _install_automation(
+        home, automation_id="two", goal_id="bound", agent_id="a",
+        rrule="FREQ=MINUTELY;INTERVAL=9", status="PAUSED",
+    )
+    assert codex_delivery_expectations([lane])[lane].expected_interval_minutes == 5
+
+
+def test_case_alias_cadence_uses_physical_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import PurePosixPath
+
+    home = CodexHome(tmp_path / ".codex")
+    alias = tmp_path / ".CODEX"
+    if not alias.exists() or not alias.samefile(home.root):
+        pytest.skip("Requires a case-insensitive filesystem")
+    _install_automation(
+        home, automation_id="one", goal_id="bound", agent_id="a",
+        rrule="FREQ=MINUTELY;INTERVAL=5",
+    )
+    lane = HostDeliveryScope(
+        goal_id="bound", agent_id="a", host_surface="codex-app", thread_id="t-open"
+    )
+    assert codex_delivery_expectations([lane], homes=[alias, home.root])[lane].expected_interval_minutes == 5
+    # Case-insensitive POSIX volumes retain differently cased resolved names.
+    # Windows may canonicalize their spelling; preserve the POSIX comparison
+    # here while keeping directory identity and manifest reads on the real FS.
+    resolve = Path.resolve
+
+    def resolved_spelling(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if str(path) in (str(home.root), str(alias)):
+            return PurePosixPath(str(path))
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolved_spelling)
+    reads: list[Path] = []
+    read_text = Path.read_text
+
+    def record_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path.name == "automation.toml":
+            reads.append(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", record_read)
+    assert codex_delivery_expectations([lane], homes=[alias, home.root])[lane].expected_interval_minutes == 5
+    assert reads == [alias / "automations" / "one" / "automation.toml"]
+    _install_automation(
+        home, automation_id="two", goal_id="bound", agent_id="a",
+        rrule="FREQ=MINUTELY;INTERVAL=9",
+    )
+    assert codex_delivery_expectations([lane], homes=[alias, home.root]) == {}
+
+
+def test_discovered_home_becoming_a_loop_preserves_healthy_cadence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    healthy = CodexHome(tmp_path / ".codex")
+    unstable = tmp_path / ".codex-unstable"
+    unstable.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("LOOPX_CODEX_HOMES", raising=False)
+    discovered = codex_homes()
+    assert unstable in discovered
+    _install_automation(
+        healthy, automation_id="one", goal_id="bound", agent_id="a",
+        rrule="FREQ=MINUTELY;INTERVAL=5",
+    )
+    lane = HostDeliveryScope(
+        goal_id="bound", agent_id="a", host_surface="codex-app", thread_id="t-open"
+    )
+    unstable.rmdir()
+    alias_active = True
+    if os.name == "nt":
+        created = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(unstable), str(unstable)],
+            capture_output=True,
+        )
+        assert created.returncode == 0, created.stderr or created.stdout
+        request.addfinalizer(lambda: unstable.rmdir() if alias_active else None)
+    else:
+        unstable.symlink_to(unstable, target_is_directory=True)
+        request.addfinalizer(lambda: unstable.unlink() if alias_active else None)
+    monkeypatch.setattr(codex_activity, "codex_homes", lambda: discovered)
+    assert codex_delivery_expectations([lane])[lane].expected_interval_minutes == 5
+    healthy.thread("t-open", [_event(T0, "task_started"), _item(T1)])
+    payload = _status(*(
+        {"agent_id": agent, "host_surface": "codex-app", "thread_id": "t-open"}
+        for agent in ("a", "other")
+    ))
+    attach_host_thread_activity(payload, observers=codex_thread_observers([healthy.root]))
+    attach_host_delivery_windows(
+        payload, expectations=codex_delivery_expectations,
+        now=datetime(2026, 9, 25, 10, 6, tzinfo=timezone.utc),
+    )
+    rows = payload["run_history"]["goals"][0]["host_thread_activity"]["threads"]
+    assert [row["delivery_window"]["state"] for row in rows] == ["fresh", "unknown"]
+    # Recovery does not require restarting the reader or retaining failure state.
+    if os.name == "nt":
+        unstable.rmdir()
+    else:
+        unstable.unlink()
+    alias_active = False
+    recovered = CodexHome(unstable)
+    _install_automation(
+        recovered, automation_id="recovered", goal_id="bound", agent_id="other",
+        rrule="FREQ=MINUTELY;INTERVAL=7",
+    )
+    assert codex_delivery_expectations([lane])[lane].expected_interval_minutes == 5
+    other = HostDeliveryScope(
+        goal_id="bound", agent_id="other", host_surface="codex-app", thread_id="t-open"
+    )
+    assert codex_delivery_expectations([other])[other].expected_interval_minutes == 7
 
 
 def test_delivery_expectations_resolve_only_installed_active_app_automations(

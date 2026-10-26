@@ -20,7 +20,7 @@ from test_research_analysis_api import workspace as workspace
 from loopx.capabilities.benchmark_toolkit.trajectory_assessment_store import register_pack
 from loopx.capabilities.explore.result_log import (
     append_explore_result_event, build_explore_edge_event, build_explore_node_event, build_explore_finding_event,
-    explore_history_rows, explore_result_log_path,
+    explore_result_log_path,
 )
 from loopx.control_plane.status.goal_source import GoalSource
 

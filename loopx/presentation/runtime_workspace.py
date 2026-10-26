@@ -104,12 +104,16 @@ class RuntimeWorkspaceHandler(ResearchAnalysisRequestMixin, BaseHTTPRequestHandl
         return parse_strict_json_object(self.rfile.read(length))
 
     def _research_analysis_scope(self, goal_id, *, cancel=False):
-        # Check current access and actual registered membership before local
-        # pack reads or provider effects. No host registry entry is created.
         try:
-            # Display reads may share their short cache. A provider operation
-            # must check the original source again before admitting any work.
-            self.server.reader.registered_status(goal_id, fresh=self.command == "POST")
+            if cancel:
+                # The shared handler pins the namespace; the toolkit still
+                # verifies the local pack/key and existing job before stopping
+                # it. Source availability is admission for new work only.
+                self.server.source.check_scope(goal_id)
+            else:
+                # Display reads may share their short cache. Starts and retries
+                # must check the original source before admitting new work.
+                self.server.reader.registered_status(goal_id, fresh=self.command == "POST")
         except SourceScopeError:
             self._send_error("Goal or connection is not available in this source.", status=404)
             return None

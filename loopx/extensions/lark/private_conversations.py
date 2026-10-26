@@ -31,6 +31,7 @@ from .manager_context import manager_failure_reply
 from .inbox_reactions import mark_lark_event_inbox_processing, mark_lark_event_inbox_received
 from .outbound import present_lark_conversation_text as _presentation_text
 from .private_images import private_message_caption, private_message_images
+from .return_files import uploaded_chat_images, verify_chat_images
 from .private_progress import (ACTIVITY_UPDATE_INTERVAL_SEC, UPDATE_INTERVAL_SEC, legacy_recovery_repairs,
                                presentation_phase, presentation_stream, project_progress)
 
@@ -86,6 +87,12 @@ class LarkPrivateConversations:
             raise OSError("Lark profile configuration could not be read")
         apps = {str(row.get("name") or ""): str(row.get("appId") or "")
                 for row in configured if isinstance(row, Mapping)}
+        # lark-cli also accepts an App ID as --profile. Legacy shared group
+        # listeners retain that selector; discover the same App without
+        # renaming its binding or opening a competing consumer. Explicit
+        # profile names take precedence over the App-ID fallback.
+        for app_id in list(apps.values()):
+            apps.setdefault(app_id, app_id)
         profiles = {}
         for row in bindings:
             app_id = apps.get(row["transport_ref"], "")
@@ -818,7 +825,7 @@ class LarkPrivateConversations:
     def _deliver(self, path: Path, record: dict[str, Any], phase: str, text: str, *, inbox: Callable[[], Path],
                  edit_only: bool = False, authorization_check: Callable[[], bool] | None = None,
                  reply_placement: str | None = None, delivery_id: str | None = None,
-                 finalize_source: bool = True) -> bool:
+                 finalize_source: bool = True, image_attachments: list[dict[str, Any]] | None = None) -> bool:
         if not text:
             return False
         if reply_placement is not None and (record["event"].get("chat_type") != "p2p"
@@ -838,11 +845,29 @@ class LarkPrivateConversations:
             text = _presentation_text(text)
         if phase_state.get("text") not in (None, text):
             raise ValueError("delivery content changed after an attempt")
+        if image_attachments and (kind != "web" or reply_placement != "chat_root" or edit_only):
+            raise ValueError("App image projection requires its original private outbox")
         record_event_timing(record["profile"], record["event"]["message_id"], "delivery_started")
         config = inbox()
         record_event_timing(record["profile"], record["event"]["message_id"], "delivery_inbox_ready")
+        def image_authorized() -> bool:
+            if authorization_check is None or not authorization_check():
+                return False
+            name, verified = self._source_authority(record, record["profile"],
+                record["event"]["chat_id"], record["event"]["message_id"])
+            return bool(name) and verified
+
+        image_keys = ()
+        if image_attachments:
+            image_keys = uploaded_chat_images(root=self.runtime_root, profile=record["profile"],
+                provider_ref=record["binding_id"], attachments=image_attachments, private_transport=self,
+                before_upload=image_authorized, verify_only=bool(phase_state.get("started") or phase_state.get("attempt")))
+            if phase_state.get("image_keys", list(image_keys)) != list(image_keys):
+                raise ValueError("App image delivery resources changed after an attempt")
+            phase_state["image_keys"] = list(image_keys)
         kwargs = dict(project=self.runtime_root, config_path=config,
             message_id=record["event"]["message_id"], text=text, runner=self._reply_runner,
+            **({"image_keys": image_keys} if image_keys else {}),
             **({"reply_placement": reply_placement} if reply_placement is not None else {}),
             **({"delivery_id": delivery_id} if delivery_id is not None else {}),
             finalize_reactions=finalize_source and not edit_only and kind not in {"admission", "progress", "periodic_report"} and not (kind == "terminal" and record.get("commission_resources")),
@@ -862,20 +887,29 @@ class LarkPrivateConversations:
             return False
         if edit and reply_placement is not None:
             raise ValueError("a new private message cannot replace an existing source reply")
-        if edit:
-            def before_edit(_intent: str) -> dict[str, bool]:
-                phase_state.update(text=text, started=True)
-                record["deliveries"][phase] = phase_state
-                _atomic_write_json(path, record)
-                return {"continue_delivery": True}
 
+        def before_send(_intent: str) -> dict[str, bool]:
+            # Provider preview is external IO. Recheck the original source and
+            # current Core grant afterwards, including every resumed rich part.
+            if authorization_check is not None and not authorization_check():
+                return {"continue_delivery": False}
+            name, verified = self._source_authority(record, record["profile"],
+                record["event"]["chat_id"], record["event"]["message_id"])
+            if not name or not verified or (authorization_check is not None and not authorization_check()):
+                return {"continue_delivery": False}
+            phase_state.update(text=text, started=True)
+            record["deliveries"][phase] = phase_state
+            _atomic_write_json(path, record)
+            return {"continue_delivery": True}
+
+        if edit:
             def edit_attempt(value: Any) -> None:
                 phase_state["attempt"] = dict(value)
                 record["deliveries"][phase] = phase_state
                 _atomic_write_json(path, record)
 
             result = update_lark_inbox_reply(**kwargs, previous_text=edit["text"], attempt=edit["attempt"],
-                before_send=before_edit, delivery_attempt_recorder=edit_attempt,
+                before_send=before_send, delivery_attempt_recorder=edit_attempt,
                 require_previous_text_match=edit_only)
             if not edit_only and result.get("blocker") == "provider_update_edit_limit":
                 # A confirmed edit rejection plus fresh non-matching readback
@@ -901,18 +935,13 @@ class LarkPrivateConversations:
                 _atomic_write_json(path, record)
                 return self._deliver(path, record, phase, text, inbox=inbox)
         elif phase_state.get("attempt"):
-            result = verify_lark_inbox_reply(**kwargs, attempt=phase_state["attempt"], resume_parts=True)
+            result = verify_lark_inbox_reply(**kwargs, attempt=phase_state["attempt"], resume_parts=True,
+                                            before_send=before_send)
         elif phase_state.get("started"):
             # A crash between provider write and its receipt is ambiguous. Keep
             # the original source recoverable; never resend blindly.
             return False
         else:
-            def before_send(_intent: str) -> dict[str, bool]:
-                phase_state.update(text=text, started=True)
-                record["deliveries"][phase] = phase_state
-                _atomic_write_json(path, record)
-                return {"continue_delivery": True}
-
             def attempt(value: Any) -> None:
                 phase_state["attempt"] = dict(value)
                 _atomic_write_json(path, record)
@@ -925,6 +954,15 @@ class LarkPrivateConversations:
                                                              if row.get("binding_id") == record["binding_id"]), {}))))
         # A verified intermediate reply is not completion. A final reply with
         # cleanup owed recovers its original attempt; it must never be resent.
+        if image_attachments and result.get("reply_verified") is True and result.get("ok") is True:
+            from .post_delivery import attachment_reply
+            image_text, image_attempt = attachment_reply(project=self.runtime_root, config_path=config,
+                attempt=phase_state["attempt"], text=text)
+            verified = verify_chat_images(profile=record["profile"], message_id=image_attempt["message_ref"],
+                text=image_text, attachments=image_attachments, keys=image_keys, private_transport=self,
+                before_read=image_authorized)
+            result.update(verified)
+            phase_state["images_verified"] = verified.get("reply_verified") is True
         phase_state["verified"] = result.get("reply_verified") is True and result.get("ok") is True
         phase_state["blocker"] = result.get("blocker")
         record["deliveries"][phase] = phase_state
@@ -1218,7 +1256,11 @@ class LarkPrivateConversations:
                 pending = next((message for message in messages
                     if not row["deliveries"].get("web." + message["message_id"], {}).get("verified")), None)
                 if pending is None:
-                    row["status"] = "partial" if any(message.get("attachments") for message in messages) else "delivered"
+                    # Older verified placeholders retain their exact attempts.
+                    # They cannot be relabelled as media delivery or resent.
+                    row["status"] = "partial" if any(message.get("attachments") and not
+                        row["deliveries"].get("web." + message["message_id"], {}).get("images_verified")
+                        for message in messages) else "delivered"
                     _atomic_write_json(path, row)
                     return 0
                 def authorized() -> bool:
@@ -1228,14 +1270,13 @@ class LarkPrivateConversations:
                         return False
                 who = "你" if pending["role"] == "user" else "LoopX"
                 text = f"**{who}（App）**\n\n{pending['text']}"
-                if pending.get("attachments"):
-                    text += "\n\n（此条 App 附件尚未同步，请在原 App 查看。）"
                 delivery_id = hashlib.sha256(json.dumps(
                     [row["binding_id"], row["session_id"], pending["message_id"]],
                     separators=(",", ":")).encode()).hexdigest()
                 delivered = self._deliver(path, row, "web." + pending["message_id"], text,
                     inbox=lambda: self._inbox(row), authorization_check=authorized,
-                    reply_placement="chat_root", delivery_id=delivery_id, finalize_source=False)
+                    reply_placement="chat_root", delivery_id=delivery_id, finalize_source=False,
+                    image_attachments=pending.get("attachments"))
                 if delivered:
                     row.pop("blocker", None)
                 _atomic_write_json(path, row)

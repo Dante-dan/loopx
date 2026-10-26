@@ -1079,6 +1079,7 @@ export function PersonalWorkspacePage({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const channelScrollRef = useRef<HTMLDivElement>(null);
   const followConversationRef = useRef(true);
+  const conversationScrollTopRef = useRef(0);
   const [showLatestMessage, setShowLatestMessage] = useState(false);
   const settingsReturnFocusRef = useRef<HTMLElement | null>(null);
   const settingsFromModelMenuRef = useRef(false);
@@ -1115,6 +1116,13 @@ export function PersonalWorkspacePage({
     ? conversationContextKey({ kind: "project", projectRef: selectedWorkspaceRef })
     : selectedGoalId ?? "manager";
   const composerDraftKey = conversationInputKey(conversationKey, selectedAgentId, managedWorkActive || Boolean(originalConversation));
+  const [modelSettingsSaving, setModelSettingsSaving] = useState<Record<string, boolean>>({});
+  async function saveModelSettings(change: () => void | Promise<void>) {
+    const key = composerDraftKey;
+    setModelSettingsSaving(current => ({...current, [key]: true}));
+    try { await change(); }
+    finally { setModelSettingsSaving(current => { const next = {...current}; delete next[key]; return next; }); }
+  }
   const { composer, setComposer, restoreFailedSubmission,
     sending, setSending, steering, setSteering, actionFeedback, setActionFeedback,
     imageAttachments, setImageAttachments, imageAttachmentError, setImageAttachmentError,
@@ -1396,16 +1404,36 @@ export function PersonalWorkspacePage({
     followConversationRef.current = true;
     setShowLatestMessage(false);
     const scroller = channelScrollRef.current;
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    if (scroller) {
+      scroller.scrollTop = scroller.scrollHeight;
+      conversationScrollTopRef.current = scroller.scrollTop;
+    }
   }
   useEffect(() => {
     followConversationRef.current = true;
+    conversationScrollTopRef.current = channelScrollRef.current?.scrollTop ?? 0;
     setShowLatestMessage(false);
   }, [conversationKey, selectedAgentId, conversationOpen]);
   useEffect(() => {
-    if (!conversationOpen || !followConversationRef.current) return;
-    const frame = window.requestAnimationFrame(scrollToLatestMessage);
-    return () => window.cancelAnimationFrame(frame);
+    if (!conversationOpen) return;
+    let frame = 0;
+    const follow = () => {
+      if (!followConversationRef.current) return;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (followConversationRef.current) scrollToLatestMessage();
+      });
+    };
+    follow();
+    // Images, expanded replies and a resized window can change the viewport
+    // without a new message. Keep following only while the reader is at the end.
+    const observer = new ResizeObserver(follow);
+    const scroller = channelScrollRef.current;
+    if (scroller) {
+      observer.observe(scroller);
+      scroller.querySelectorAll(".personal-channel-timeline").forEach(element => observer.observe(element));
+    }
+    return () => {observer.disconnect(); window.cancelAnimationFrame(frame);};
   }, [conversationOpen, conversationKey, selectedAgentId, conversationMessages.length,
     latestMessageTextLength, latestMessage?.pending, latestMessage?.activity?.length, latestMessage?.steps]);
   useEffect(() => {
@@ -2343,6 +2371,7 @@ export function PersonalWorkspacePage({
   }
 
   async function sendMessage(messageOverride?: string, intent: "send" | "steer" = "send") {
+    if (modelSettingsSaving[composerDraftKey]) return;
     const pendingImages = messageOverride ? [] : imageAttachments;
     const message = (messageOverride ?? composer).trim() || (pendingImages.length ? t("composer.imageAnalysisPrompt") : "");
     if (!message || composerBlocked || workspaceUnavailable || (originalConversation && !originalConversation.session?.resumable) || (workspaceConversations?.managed && !workspaceConversations.managed.session?.resumable) || conversationHistoryState?.sendBlocked) return;
@@ -2464,7 +2493,9 @@ export function PersonalWorkspacePage({
       if (!messageOverride) {
         restoreFailedSubmission(message, pendingImages);
       }
-      const errorMessage = error instanceof Error ? error.message : t("feedback.sendGenericError");
+      const errorMessage = error instanceof ChatApiError && error.payload.error_code === "unsupported_configuration"
+        ? (locale === "zh-CN" ? "请在模型菜单调整配置后重试。" : "Adjust the model menu and retry.")
+        : error instanceof Error ? error.message : t("feedback.sendGenericError");
       setActionFeedback(t("feedback.sendFailed", { error: errorMessage }));
     } finally {
       setSending(false);
@@ -2845,7 +2876,10 @@ export function PersonalWorkspacePage({
               if (!conversationOpen) return;
               const { scrollHeight, scrollTop, clientHeight } = event.currentTarget;
               const nearBottom = scrollHeight - scrollTop - clientHeight < 64;
-              followConversationRef.current = nearBottom;
+              // Growing content or a shorter viewport is not a reader moving up.
+              if (nearBottom) followConversationRef.current = true;
+              else if (scrollTop < conversationScrollTopRef.current) followConversationRef.current = false;
+              conversationScrollTopRef.current = scrollTop;
               setShowLatestMessage(!nearBottom);
             }}>
             {!rootUnavailable && !runtimeSourceUnavailable ? <>
@@ -2899,7 +2933,7 @@ export function PersonalWorkspacePage({
                     sessionId={selectedWorkSessionId} onSession={(id, replace) => callbacks.onSelectWorkSession?.(id, replace)}
                     onSelect={id => callbacks.onSelectWorkAgent?.(id)} onClose={() => callbacks.onSelectWorkAgent?.(null)}>
                     {workspaceConversations?.managed?.error ? <p role="alert">{workspaceConversations.managed.error} <button type="button" onClick={workspaceConversations.managed.retry}>{t("history.retry")}</button></p> : null}
-                    <ChannelTimeline items={visibleTimelineItems.filter(item => item.kind === "message")} onSelect={setSelection} selectedGoal={selectedGoal}
+                    <ChannelTimeline readOnly={readOnly} items={visibleTimelineItems.filter(item => item.kind === "message")} onSelect={setSelection} selectedGoal={selectedGoal}
                       onAdjustTurn={steeringTurnId ? focusTurnComposer : undefined}
                       onCancelPreparation={!readOnly && callbacks.onCancelConversationPreparation ? () => callbacks.onCancelConversationPreparation!(conversationKey) : undefined}
                       onInterruptTurn={!readOnly && callbacks.onInterruptConversationTurn ? turnId => callbacks.onInterruptConversationTurn!(conversationKey, turnId) : undefined}/>
@@ -2911,7 +2945,7 @@ export function PersonalWorkspacePage({
                         run={activeSessionRun}
                       />
                     ) : null}
-                    <ChannelTimeline onReviewGoalDraft={readOnly ? undefined : reviewGoalDraft} onSuggestReply={readOnly ? undefined : suggestReply} items={visibleTimelineItems} onSelect={setSelection} selectedGoal={selectedGoal}
+                    <ChannelTimeline readOnly={readOnly} onReviewGoalDraft={readOnly ? undefined : reviewGoalDraft} onSuggestReply={readOnly ? undefined : suggestReply} items={visibleTimelineItems} onSelect={setSelection} selectedGoal={selectedGoal}
                       onAdjustTurn={steeringTurnId ? focusTurnComposer : undefined}
                       onCancelPreparation={!readOnly && callbacks.onCancelConversationPreparation
                         ? () => callbacks.onCancelConversationPreparation!(selectedGoal.goalId) : undefined}
@@ -2927,7 +2961,7 @@ export function PersonalWorkspacePage({
                 operations={actionReadback.isError ? [] : homeOperations} onSelectOperation={proposal => setSelection({kind: "proposal", item: proposal})}
                 onViewAllOperations={() => setSelectedGoalTab("chat")} />
             ) : (
-              <ChannelTimeline emptyState={workspaceTitle ? { title: workspaceTitle, description: t("workspace.empty") } : undefined} onReviewGoalDraft={readOnly ? undefined : reviewGoalDraft} onSuggestReply={readOnly ? undefined : suggestReply}
+              <ChannelTimeline readOnly={readOnly} emptyState={workspaceTitle ? { title: workspaceTitle, description: t("workspace.empty") } : undefined} onReviewGoalDraft={readOnly ? undefined : reviewGoalDraft} onSuggestReply={readOnly ? undefined : suggestReply}
                 items={selectedWorkspaceRef || originalConversation ? managerChatItems.filter((item) => item.kind === "message") : managerChatItems}
                 onSelect={setSelection} selectedGoal={null} showManagerTeamResults={!selectedWorkspaceRef && !originalConversation}
                 onAdjustTurn={steeringTurnId ? focusTurnComposer : undefined}
@@ -2966,7 +3000,7 @@ export function PersonalWorkspacePage({
               <span>{t("workspace.unavailable")}</span>
             </div> : null}
             {conversationHistoryState && conversationHistoryState.phase !== "ready" ? (
-              <div className="personal-history-notice" role="status">
+              <div className={conversationHistoryState.phase === "loading" ? "sr-only" : "personal-history-notice"} role="status">
                 <div><span>{t(`history.${conversationHistoryState.phase}`)}</span>
                   {conversationHistoryState.sendBlocked && conversationHistoryState.phase !== "loading"
                     ? <span>{t("history.currentSessionRecovering")}</span> : null}</div>
@@ -2979,7 +3013,7 @@ export function PersonalWorkspacePage({
 
             {loopxMessageReceipt ? <p className="personal-composer-status" role="status">{loopxMessageReceipt}</p> : null}
             {readOnly ? (
-              sourceGoal?.sourceAccess ? null : <div className="personal-read-only-notice"><strong>{t("source.readOnlyNoticeTitle")}</strong><span>{t("source.readOnlyNoticeDescription")}</span></div>
+              sourceGoal?.sourceAccess ? null : <div className="personal-read-only-notice"><strong>{t("source.readOnlyNoticeTitle")}</strong><ContextHelp label={t("source.readOnlyNoticeTitle")}><p>{t("source.readOnlyNoticeDescription")}</p></ContextHelp></div>
             ) : <>
             {!selectedGoal && !managerChatOpen && managerConversationReceiptVisible && managerMessages.length ? (
               <ManagerConversationTray onReviewGoalDraft={reviewGoalDraft} onSuggestReply={suggestReply}
@@ -3140,11 +3174,11 @@ export function PersonalWorkspacePage({
                   key={`${conversationKey}:${selectedAgentId}`} agents={agents} agentId={selectedAgentId}
                   goalId={selectedGoal?.goalId} original={Boolean(originalConversation || managedWorkActive)}
                   model={selectedAgentModelId} effort={selectedAgentReasoningEffort} readback={selectedAgentModelReadback}
-                  onAgent={selectAgent} onModel={model => callbacks.onSelectAgentModel?.(selectedAgentId, model)}
-                  onEffort={effort => callbacks.onSelectAgentReasoningEffort?.(selectedAgentId, effort)}
+                  onAgent={selectAgent} onModel={model => saveModelSettings(() => callbacks.onSelectAgentModel?.(selectedAgentId, model))}
+                  onEffort={effort => saveModelSettings(() => callbacks.onSelectAgentReasoningEffort?.(selectedAgentId, effort))}
                   onDefaults={selectedGoal && !originalConversation ? () => openSettings({kind: "settings", tab: "conversation"}, true) : undefined}
                 /> : null}
-              <button className="personal-composer-send" aria-label={t("composer.send")} disabled={(!composer.trim() && imageAttachments.length === 0) || composerBlocked || workspaceUnavailable || (originalConversation && !originalConversation.session?.resumable) || (workspaceConversations?.managed && !workspaceConversations.managed.session?.resumable) || conversationHistoryState?.sendBlocked} onClick={() => void sendMessage()} title={t("composer.sendMessageHint")} type="button"><Send size={18} /></button>
+              <button className="personal-composer-send" aria-label={t("composer.send")} disabled={modelSettingsSaving[composerDraftKey] || (!composer.trim() && imageAttachments.length === 0) || composerBlocked || workspaceUnavailable || (originalConversation && !originalConversation.session?.resumable) || (workspaceConversations?.managed && !workspaceConversations.managed.session?.resumable) || conversationHistoryState?.sendBlocked} onClick={() => void sendMessage()} title={t("composer.sendMessageHint")} type="button"><Send size={18} /></button>
               </div>
             </div>
 

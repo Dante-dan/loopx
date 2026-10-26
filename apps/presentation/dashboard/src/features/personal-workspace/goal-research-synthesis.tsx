@@ -1,6 +1,7 @@
 import {useId, useState, type ReactNode} from "react";
-import {ArrowDownRight, ArrowUpRight} from "lucide-react";
+import {ArrowDownRight, ArrowUpRight, Sparkles} from "lucide-react";
 import type {AssessmentCitation, TrajectoryResearchSynthesis} from "../../../../../../loopx/control_plane/capabilities/trajectory_assessment_types.js";
+import {ContextHelp} from "./context-help";
 import "./goal-research-synthesis.css";
 
 type Props = {synthesis: TrajectoryResearchSynthesis; zh: boolean; detail?: boolean;
@@ -20,13 +21,19 @@ export function ResearchSynthesis({synthesis: s, zh, detail = false, onExpand, o
   const episodeLink = (ids: string[]) => onReviewEpisodes && ids.length ? <button type="button" className="research-review-episodes"
     onClick={event => onReviewEpisodes(ids, event.currentTarget)}>{zh ? "查看片段" : "View episodes"} · {ids.length}<ArrowDownRight size={14} aria-hidden/></button> : null;
   const controls = (experiment: TrajectoryResearchSynthesis["next_experiments"][number]) => <dl>
-    <dt>{zh ? "最小干预" : "Smallest intervention"}</dt><dd>{experiment.intervention}</dd>
+    <dt>{zh ? "拟议干预" : "Proposed intervention"}</dt><dd>{experiment.intervention}</dd>
     <dt>{zh ? "固定条件" : "Controls"}</dt><dd>{experiment.controls}</dd>
   </dl>;
   const predictions = (experiment: TrajectoryResearchSynthesis["next_experiments"][number]) => <dl>
     <dt>{zh ? "预期区分" : "Distinguishing prediction"}</dt><dd>{experiment.prediction}</dd>
     <dt>{zh ? "推翻解释的结果" : "Disconfirming result"}</dt><dd>{experiment.disconfirming_result}</dd>
   </dl>;
+  const findingAccount = (finding: TrajectoryResearchSynthesis["findings"][number]) => <div className={`research-report-account${detail ? " research-report-comparison" : ""}`}>
+    <div><h6>{zh ? "观察与依据" : "Observation and evidence"}</h6>
+      <p>{finding.observation}</p>{citations(finding.citations)}</div>
+    <div><h6>{zh ? "解释" : "Interpretation"}</h6>
+      <p>{finding.interpretation}</p>{alternatives(finding.alternative_explanations)}</div>
+  </div>;
   const overview = <>
     <p className="research-synthesis-summary">{s.summary.text}</p>
     <details className="research-report-summary-sources"><summary>{zh ? "概览来源" : "Summary sources"} · {s.summary.citations.length}</summary>{citations(s.summary.citations)}</details>
@@ -35,8 +42,7 @@ export function ResearchSynthesis({synthesis: s, zh, detail = false, onExpand, o
   if (!detail) {
     body = <>
       <ol className="research-report-findings">{s.findings.map((finding, i) => <li key={i}><details className="research-synthesis-finding">
-        <summary>{finding.title}</summary><p>{finding.observation}</p><p>{finding.interpretation}</p>
-        {alternatives(finding.alternative_explanations)}{citations(finding.citations)}
+        <summary>{finding.title}</summary>{findingAccount(finding)}
       </details></li>)}</ol>
       {s.next_experiments[0] ? <p className="research-report-next"><strong>{zh ? "优先研究" : "Investigate first"}</strong> · {s.next_experiments[0].question}</p> : null}
     </>;
@@ -62,12 +68,10 @@ export function ResearchSynthesis({synthesis: s, zh, detail = false, onExpand, o
             {episodeLink(experiment.episode_ids)}
           </article>)}
         </div> : <div className="research-report-matrix">
-          {!!s.findings.length && <div className="research-report-columns" aria-hidden><span>{zh ? "观察与依据" : "Observation and evidence"}</span><span>{zh ? "解释与竞争解释" : "Interpretation and alternatives"}</span></div>}
           {!s.findings.length ? <p>{zh ? "现有证据不足以形成进一步结论。" : "The evidence does not justify further findings."}</p> : null}
           {s.findings.map((finding, i) => <article key={i} className="research-report-finding">
             <h5><span>{i + 1}.</span> {finding.title}</h5>
-            <div className="research-report-comparison"><div><p>{finding.observation}</p>{citations(finding.citations)}</div>
-              <div><p>{finding.interpretation}</p>{alternatives(finding.alternative_explanations)}</div></div>
+            {findingAccount(finding)}
             {episodeLink(finding.episode_ids)}
           </article>)}
         </div>}
@@ -75,9 +79,12 @@ export function ResearchSynthesis({synthesis: s, zh, detail = false, onExpand, o
     </>;
   }
   return <section className={`research-synthesis${detail ? " research-synthesis-detail" : ""}`} aria-label={zh ? "研究汇报" : "Research report"}>
-    <header>{!detail ? <h3>{zh ? "研究汇报" : "Research report"}</h3> : null}<span>{zh ? "Agent 分析" : "Agent analysis"}</span>
-      {!detail && onExpand ? <button type="button" className="research-report-expand" onClick={event => onExpand(event.currentTarget)}>{zh ? "深入解读" : "Read deeper"}<ArrowUpRight size={14} aria-hidden/></button> : null}
-    </header>
+    {!detail ? <header><h3>{zh ? "研究汇报" : "Research report"}</h3>
+      <ContextHelp label={zh ? "Agent 分析 · 未校准" : "Agent analysis · uncalibrated"} icon={Sparkles}>
+        <p>{zh ? "此汇报是 Agent 对选定证据的分析；引用可读不等于解释已被独立核验。" : "This report is the Agent’s analysis of selected evidence; readable citations do not independently verify its interpretation."}</p>
+      </ContextHelp>
+      {onExpand ? <button type="button" className="research-report-expand" onClick={event => onExpand(event.currentTarget)}>{zh ? "深入解读" : "Read deeper"}<ArrowUpRight size={14} aria-hidden/></button> : null}
+    </header> : null}
     {!detail ? overview : null}
     {body}
   </section>;

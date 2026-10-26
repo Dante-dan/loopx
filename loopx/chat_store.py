@@ -23,6 +23,7 @@ from .capabilities.steward_executor.allocation import (
 )
 from .capabilities.native_chat.model_settings import (
     MODEL_SELECTION_UNSET as _MODEL_SELECTION_UNSET, normalize_agent_model_id, normalize_session_model_settings,
+    session_model_settings_supported,
 )
 from .chat_event_cache import ChatEventCache
 from .chat_ingress import (
@@ -434,7 +435,7 @@ class ChatSessionStore(ChatIngressStore):
             _atomic_write_json(path, payload)
             return payload
 
-    def update_session(self, session_id: str, **changes: Any) -> dict[str, Any]:
+    def update_session(self, session_id: str, *, expected_statuses: set[str] | None = None, **changes: Any) -> dict[str, Any]:
         path = self._session_path(session_id)
         with self._session_lock(session_id):
             with exclusive_file_lock(
@@ -445,6 +446,8 @@ class ChatSessionStore(ChatIngressStore):
                 payload = self.load_session(session_id)
                 if payload is None:
                     raise KeyError("chat session was not found")
+                if expected_statuses is not None and payload.get("status") not in expected_statuses:
+                    raise KeyError("chat session is no longer open")
                 if payload.get("managed_agent_id") is not None and "goal_id" in changes and changes["goal_id"] != payload["goal_id"]:
                     raise ValueError("a registered Agent Session cannot change its original Goal")
                 allowed = {
@@ -473,6 +476,7 @@ class ChatSessionStore(ChatIngressStore):
                     "manager_executor_allocation",
                     "agent_model_id",
                     "agent_reasoning_effort", "agent_service_tier",
+                    "requested_agent_model_id", "requested_agent_reasoning_effort",
                     "goal_id",
                 }
                 unknown = set(changes) - allowed
@@ -506,6 +510,9 @@ class ChatSessionStore(ChatIngressStore):
                     changes["upstream_thread_id"] = _upstream_id(changes["upstream_thread_id"])
                 if "agent_model_id" in changes:
                     changes["agent_model_id"] = normalize_agent_model_id(changes["agent_model_id"]) if changes["agent_model_id"] else None
+                for field in ("requested_agent_model_id", "requested_agent_reasoning_effort"):
+                    if field in changes:
+                        changes[field] = normalize_agent_model_id(changes[field]) if changes[field] is not None else None
                 for key in ("agent_reasoning_effort", "agent_service_tier"):
                     if key in changes:
                         changes[key] = normalize_agent_model_id(changes[key]) if changes[key] else None
@@ -839,8 +846,9 @@ class ChatSessionStore(ChatIngressStore):
             _append_jsonl(path, payload)
         return payload
 
-    def messages(self, session_id: str) -> list[dict[str, Any]]:
-        return _read_jsonl(self._session_dir(session_id) / "messages.jsonl")
+    def messages(self, session_id: str, *, strict: bool = False) -> list[dict[str, Any]]:
+        return _read_jsonl(self._session_dir(session_id) / "messages.jsonl",
+                          raise_on_error=strict, strict=strict)
 
     def prepared_managed_turn_request(
         self,
@@ -1913,6 +1921,7 @@ class ChatSessionStore(ChatIngressStore):
                 "session_id", "goal_id", "agent_id", "adapter_kind", "status",
                 "agent_model_id",
                 "agent_reasoning_effort", "agent_service_tier",
+                "requested_agent_model_id", "requested_agent_reasoning_effort",
                 "active_turn_id", "last_error_code", "created_at", "updated_at", "last_activity_at",
             )
         } | {
@@ -1923,6 +1932,7 @@ class ChatSessionStore(ChatIngressStore):
                 if revision is not None else None
             ),
             "session_mode": session_mode,
+            "model_settings_supported": session_model_settings_supported(payload),
             "executor_endpoint_id": str(
                 payload.get("executor_endpoint_id") or payload.get("agent_id") or ""
             ),
@@ -1964,7 +1974,7 @@ class ChatSessionStore(ChatIngressStore):
             and payload.get("status") in RESUMABLE_SESSION_STATES,
         }
 
-    def session_snapshot(self, session_id: str) -> dict[str, Any]:
+    def session_snapshot(self, session_id: str, *, strict_messages: bool = False) -> dict[str, Any]:
         payload = self.load_session(session_id)
         if payload is None:
             raise KeyError("chat session was not found")
@@ -1981,6 +1991,7 @@ class ChatSessionStore(ChatIngressStore):
             "ok": True,
             "schema_version": CHAT_STORE_SCHEMA_VERSION,
             "session": self.public_session(payload),
-            "messages": self.messages(session_id),
+            "messages": (self.messages(session_id, strict=True) if strict_messages
+                         else self.messages(session_id)),
             "active_turn": active_turn,
         }

@@ -39,6 +39,9 @@ def post_request_bytes(text: str, template: Mapping[str, Any]) -> int:
         content.update(
             {key: value for key, value in authored.items() if key != "zh_cn"}
         )
+        locale = authored.get("zh_cn")
+        if isinstance(locale, Mapping) and isinstance(locale.get("content"), list):
+            content["zh_cn"] = {**locale, "content": [content["zh_cn"]["content"][0], *locale["content"][1:]]}
     body = {
         **template,
         "content": json.dumps(content, ensure_ascii=False, separators=(",", ":")),

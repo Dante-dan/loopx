@@ -143,12 +143,17 @@ class GoalSource:
         # A reused display id cannot retain another authority's cache or cursor.
         return sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()
 
-    def check_access(self, goal_id=None):
+    def check_scope(self, goal_id=None):
+        """Validate the prepared Goal selection without accessing its connection."""
         selected = self.goal_id if goal_id is None else goal_id
         if selected is not None and (not isinstance(selected, str) or not _GOAL_ID.fullmatch(selected)):
             raise SourceScopeError("Invalid source Goal id")
         if self.goal_id is not None and selected != self.goal_id:
             raise SourceScopeError("Goal is not in this source")
+        return selected
+
+    def check_access(self, goal_id=None):
+        selected = self.check_scope(goal_id)
         # Recheck even on cached reads; a removed alias is not a retained grant.
         if self.connection == "ssh" and self.host_alias not in configured_ssh_host_aliases():
             raise SourceScopeError("The configured SSH source is unavailable")

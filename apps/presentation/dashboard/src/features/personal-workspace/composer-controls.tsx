@@ -10,8 +10,8 @@ import { WorkspaceSelect } from "./workspace-select";
 export function ComposerRuntimeControls({ agents, agentId, goalId, original, model, effort, readback, onAgent, onModel, onEffort, onDefaults }: {
   agents: WorkspaceAgentOption[]; agentId: string; goalId?: string; original: boolean;
   model?: string; effort?: string; readback?: ChatSessionSummary;
-  onAgent: (id: string) => void; onModel?: (id: string) => void;
-  onEffort?: (effort: string) => void; onDefaults?: () => void;
+  onAgent: (id: string) => void; onModel?: (id: string) => void | Promise<void>;
+  onEffort?: (effort: string) => void | Promise<void>; onDefaults?: () => void;
 }) {
   const { locale, t } = useWorkspaceI18n();
   const statusOnly = agentId === "status-only";

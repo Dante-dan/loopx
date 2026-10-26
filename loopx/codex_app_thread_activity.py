@@ -64,6 +64,7 @@ def codex_homes(env: Mapping[str, str] | None = None, user_home: Path | None = N
     ``LOOPX_CODEX_HOMES`` (``os.pathsep``-separated) is used verbatim when set.
     Otherwise ``CODEX_HOME``, ``~/.codex`` and sibling ``~/.codex-*`` homes are
     searched, because Codex App installs can each keep their own home.
+    Preserve distinct path names: callers also use them as profile aliases.
     Relative entries use the process working directory when their store is read.
     """
 
@@ -328,8 +329,22 @@ def _installed_automation_intervals(
 
     intervals: dict[tuple[str, str, str], int] = {}
     ambiguous: set[tuple[str, str, str]] = set()
+    identities: set[tuple[int, int]] = set()
     for home in codex_homes() if homes is None else homes:
-        for path in sorted((home / "automations").glob("*/automation.toml")):
+        # Discovery retains logical profile names; read each physical store only
+        # once here so an alias cannot masquerade as a second installed heartbeat.
+        try:
+            directory = home.stat()
+            identity = (directory.st_dev, directory.st_ino)
+            if identity in identities:
+                continue
+            paths = sorted((home / "automations").glob("*/automation.toml"))
+        except OSError:
+            # A discovered home can disappear or become unreadable during the
+            # scan. Preserve healthy sources and retry this home on the next read.
+            continue
+        identities.add(identity)
+        for path in paths:
             try:
                 item = tomllib.loads(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):

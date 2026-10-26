@@ -1,3 +1,4 @@
+import {exploreFindingCopy} from "./explore-finding-copy";
 import {AlertCircle, ArrowLeft, ArrowRight, Circle, CircleHelp, FlaskConical, GitBranch, RefreshCw, Search} from "lucide-react";
 import {Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState} from "react";
 import {defaultParseSearch} from "@tanstack/react-router";
@@ -106,7 +107,8 @@ export function GoalResearchHistory({goalId, active, zh, refreshRevision = 0, re
   };
   // Labels reuse Explore's existing vocabulary; they confer no verification state.
   const kindLabels: Record<string, string> = zh ? {question: "问题", hypothesis: "假设", experiment: "尝试", artifact: "产物", area: "路线"} : {question: "Question", hypothesis: "Hypothesis", experiment: "Attempt", artifact: "Artifact", area: "Route"};
-  const stateLabels: Record<string, string> = zh ? {open: "待探索", exploring: "探索中", blocked: "受阻", resolved: "已收束", dead_end: "已排除", tentative: "待检查", confirmed: "来源记为确认", refuted: "已反驳"} : {open: "Open", exploring: "Exploring", blocked: "Blocked", resolved: "Resolved", dead_end: "Ruled out", tentative: "Tentative", confirmed: "Recorded confirmation", refuted: "Refuted"};
+  const findingCopy = exploreFindingCopy(zh);
+  const stateLabels: Record<string, string> = zh ? {open: "待探索", exploring: "探索中", blocked: "受阻", resolved: "已收束", dead_end: "已排除", ...findingCopy.labels} : {open: "Open", exploring: "Exploring", blocked: "Blocked", resolved: "Resolved", dead_end: "Ruled out", ...findingCopy.labels};
   const relationLabels: Record<string, string> = zh ? {subtopic_of: "属于", depends_on: "依赖", answers: "回答", supports: "支持", refutes: "反驳", leads_to: "引向"} : {subtopic_of: "Part of", depends_on: "Depends on", answers: "Answers", supports: "Supports", refutes: "Refutes", leads_to: "Leads to"};
   const kindLabel = (kind: string) => kindLabels[kind] ?? kind;
   const stateLabel = (state: string) => stateLabels[state] ?? state;
@@ -264,7 +266,7 @@ export function GoalResearchHistory({goalId, active, zh, refreshRevision = 0, re
     if (focusPending.current && detail.current) {
       focusPending.current = false;
       detail.current.focus({preventScroll: true});
-      detail.current.scrollIntoView({block: "nearest"});
+      detail.current.scrollIntoView({block: "start"});
     }
   }, [active, selected, selectedMembers]);
   const clusterY = layout.length ? Math.max(...layout.map(item => item.y + 124)) + 24 : 24;
@@ -288,7 +290,7 @@ export function GoalResearchHistory({goalId, active, zh, refreshRevision = 0, re
     else url.searchParams.set("research_goal", goalId);
     if (selection.finding !== next.finding || selection.day !== next.day || selection.nodes.length !== next.nodes.length || selection.nodes.some((id, index) => id !== next.nodes[index])) window.history.pushState(null, "", url);
   };
-  const choose = (id: string, focus = true) => {readerParent.current = null; select({nodes: id ? [id] : [], day: null}, focus);};
+  const choose = (id: string, focus = true, finding?: string) => {readerParent.current = null; select({nodes: id ? [id] : [], day: null, finding}, focus);};
   const closeReader = () => {
     const parent = readerParent.current;
     readerParent.current = null;
@@ -298,6 +300,24 @@ export function GoalResearchHistory({goalId, active, zh, refreshRevision = 0, re
     select(parent?.selection ?? {nodes: [], day: null}, false);
   };
   const resultsAnchor = useRef<HTMLDivElement>(null), reportAnchor = useRef<HTMLDivElement>(null), historyAnchor = useRef<HTMLElement>(null);
+  const reportEntries = useRef(new Set<string>());
+  const reportScope = JSON.stringify([goalId, readSourceUrl ?? "", analysis.pack?.pack_id ?? analysis.location.packId]);
+  useLayoutEffect(() => {
+    if (!active || !analysis.location.open || reportEntries.current.has(reportScope)) return;
+    // A record/finding link owns its focus, even while history is still loading.
+    if (selection.nodes.length || selection.day !== null) {reportEntries.current.add(reportScope); return;}
+    if (analysis.loading && !analysis.pack && !analysis.readError) return;
+    const target = analysis.panel.current;
+    if (!target) return;
+    // Resolve a saved report link once per reading context. Explicit reopening
+    // keeps its existing action focus; reads and tab restoration must not rearm it.
+    reportEntries.current.add(reportScope);
+    // A user may have selected a source while this report was loading.
+    // URL restoration must not take focus from that active control.
+    if (document.activeElement && document.activeElement !== document.body && document.activeElement !== target) return;
+    target.focus({preventScroll: true});
+    target.scrollIntoView({block: "start"});
+  }, [active, reportScope, analysis.location.open, analysis.loading, analysis.pack, analysis.readError, analysis.panel, selection.nodes.length, selection.day]);
   const readingSelection = Boolean(selected || selectedMembers?.length);
   const selectedFinding = selected?.findings.find(finding => finding.result_id === selection.finding)
     ?? (!selection.finding ? selected?.findings.at(-1) : undefined);
@@ -331,7 +351,7 @@ export function GoalResearchHistory({goalId, active, zh, refreshRevision = 0, re
       </ContextHelp>
     </div> : null;
   const historyView = !value ? null : lens === "timeline" && timeline ? <div className="research-history-canvas is-timeline" ref={graph} tabIndex={-1}>
-        <GoalResearchTimeline timeline={timeline} zh={zh} selectedIds={selection.nodes} selectedDay={selection.day} dayGroups={grouped.groups} onGroupSelect={day => select({nodes: [], day})} phase={phase} onPhase={next => chooseView(lens, next)} onSelect={id => choose(id)} onSelectMany={nodes => select({nodes, day: null})} timeLabel={fullTime} dayLabel={dayTime}/>
+        <GoalResearchTimeline timeline={timeline} zh={zh} selectedIds={selection.nodes} selectedDay={selection.day} dayGroups={grouped.groups} onGroupSelect={day => select({nodes: [], day})} phase={phase} onPhase={next => chooseView(lens, next)} onSelect={(id, finding) => choose(id, true, finding)} onSelectMany={nodes => select({nodes, day: null})} timeLabel={fullTime} dayLabel={dayTime}/>
       </div> : <div className="research-history-canvas" ref={graph} tabIndex={0} aria-label={zh ? "完整已载入研究关系图；可滚动" : "Full loaded research graph; scrollable"}>
         <div className="research-history-stage" style={{width, height}}>
           <svg width={width} height={height} aria-hidden="true" className="research-history-edges">
@@ -446,7 +466,7 @@ export function GoalResearchHistory({goalId, active, zh, refreshRevision = 0, re
         <div className="research-reader-content">
         <div className="research-reader-location"><button type="button" className="research-reader-back" onClick={closeReader}><ArrowLeft size={14} aria-hidden/>{readerParent.current ? (zh ? "返回问题列表" : "Back to questions") : copy.all}</button>
         <div className="research-reader-states">
-          <p className="research-detail-kind"><GitBranch size={14} aria-hidden/>{kindLabel(selected.latest.node_kind)} · {stateLabel(selected.latest.status)}</p>
+          <div className="research-detail-kind"><GitBranch size={14} aria-hidden/>{kindLabel(selected.latest.node_kind)} · {stateLabel(selected.latest.status)} <ContextHelp label={findingCopy.help}><p>{findingCopy.meaning}</p></ContextHelp></div>
           {selected.findings.length > 1 && findingExceptions ? <p className="research-finding-exceptions">{findingExceptions}</p> : null}
         </div></div>
         {selected.findings.length ? selectedFinding?.title !== selected.latest.title ? <details className="research-reader-question" key={selected.id} open={questionExpanded} onToggle={event => setQuestionExpanded(event.currentTarget.open)}>
@@ -505,10 +525,10 @@ export function GoalResearchHistory({goalId, active, zh, refreshRevision = 0, re
         </li>)}</ol>
         </div>
       </div> : null}
-      {readingSelection ? <details className="research-history-context" key={selected?.id ?? JSON.stringify(selection.nodes) + selection.day}>
-        <summary>{zh ? "研究全景" : "Research overview"}</summary>
-        <ResearchProgressSummary analysis={analysis}/>{historyView}
-      </details> : historyView}
+      <details className={`research-history-context${readingSelection ? "" : " is-overview"}`} open={!readingSelection || undefined} key={JSON.stringify([goalId, readSourceUrl])}>
+        <summary hidden={!readingSelection}>{zh ? "研究全景" : "Research overview"}</summary>
+        {readingSelection ? <ResearchProgressSummary analysis={analysis}/> : null}{historyView}
+      </details>
     </div> : null}
     {(selection.nodes.some(id => !value?.nodes.some(node => node.id === id)) || (selection.day !== null && !selectedGroup)) && read.complete && !busy && !error && !history.error ? <p role="status">{copy.lost}</p> : null}
     {value?.events.length && !value.nodes.length ? <ContextHelp label={zh ? "节点结构未记录" : "Node structure not recorded"} icon={CircleHelp}><p className="research-history-note">{zh ? "尚未记录节点结构；可展开下面的已读记录。" : "Node structure has not been recorded; loaded records remain available below."}</p></ContextHelp> : null}

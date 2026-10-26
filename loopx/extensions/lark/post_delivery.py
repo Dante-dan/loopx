@@ -142,6 +142,7 @@ def deliver_post_parts(*, receipt, intent_digest, template, reply_text, argument
                 "attachment_names": arguments.get("attachment_names", ())
                 if final
                 else (),
+                "image_keys": arguments.get("image_keys", ()) if final else (),
             }
 
         result = deliver_manager_reply_parts(
@@ -161,7 +162,7 @@ def deliver_post_parts(*, receipt, intent_digest, template, reply_text, argument
                 int(state.get("delivery_part_stall_count") or 0) + 1
             )
             notice_options = options(0)
-            notice_options.update(attachment_keys=(), attachment_names=())
+            notice_options.update(attachment_keys=(), attachment_names=(), image_keys=())
             notice = deliver_stall_notice(
                 delivery_state=state,
                 delivery_path=path,
@@ -261,6 +262,7 @@ def verify_post_parts(*, receipt, intent_digest, attempt, arguments, resume=Fals
             finalize_reactions=False,
             attachment_keys=arguments.get("attachment_keys", ()) if final else (),
             attachment_names=arguments.get("attachment_names", ()) if final else (),
+            image_keys=arguments.get("image_keys", ()) if final else (),
         )
         if not result.get("reply_verified"):
             return result
@@ -286,7 +288,7 @@ def verify_post_parts(*, receipt, intent_digest, attempt, arguments, resume=Fals
 
 
 def attachment_reply(*, project, config_path, attempt, text):
-    """Files belong to the last concrete post, never to the composite locator."""
+    """Resources belong to the last concrete post, never the composite locator."""
     match = POST_PARTS_LOCATOR.fullmatch(str(attempt.get("message_ref") or ""))
     if not match:
         return text, attempt

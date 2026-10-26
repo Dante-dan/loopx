@@ -1,11 +1,21 @@
 """Configured Goal Chat defaults use native settings without retargeting work."""
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from loopx.capabilities.machine_configuration.builtins import build_builtin_machine_configuration_registry
-from loopx.capabilities.machine_configuration.store import configure_machine_configuration
-from loopx.capabilities.native_chat.machine_defaults import CODEX_CHAT_DEFAULTS_SCHEMA_VERSION, normalize_codex_chat_defaults
+from loopx.capabilities.configuration_ui import capability_configuration_editor
+from loopx.capabilities.machine_configuration.store import configure_machine_configuration, read_machine_configuration
+from loopx.capabilities.native_chat.machine_defaults import (
+    CODEX_CHAT_DEFAULTS_SCHEMA_VERSION,
+    codex_profile_home,
+    codex_profile_options,
+    normalize_codex_chat_defaults,
+)
 from loopx.chat_runtime import ChatRuntimeController, CodexAppServerAdapter
 from loopx.chat_store import ChatSessionStore
 
@@ -16,6 +26,76 @@ def configure(root, **fields):
         registry=build_builtin_machine_configuration_registry())
     preview = configure_machine_configuration(**kwargs)
     return configure_machine_configuration(**kwargs, execute=True, expected_plan_revision=preview["plan_revision"])
+
+
+@pytest.mark.parametrize("selection", ["configured", "sibling", "explicit"])
+def test_saved_profile_alias_opens_ordinary_conversation(tmp_path, monkeypatch, request, selection):
+    """Physical scan dedup must preserve every supported profile's logical name.
+
+    Run the real configuration transaction, editor and conversation path. Only
+    the final native adapter launch is replaced; no model or live store is used.
+    """
+    home = tmp_path / ".codex"
+    home.mkdir()
+    native_config = 'model = "fixture-model"\n'
+    (home / "config.toml").write_text(native_config, encoding="utf-8")
+    alias = tmp_path / ".codex-alias"
+    if os.name == "nt":
+        created = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(home)],
+            capture_output=True,
+        )
+        assert created.returncode == 0, created.stderr or created.stdout
+        request.addfinalizer(alias.rmdir)
+    else:
+        alias.symlink_to(home, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("LOOPX_CHAT_CODEX_HOME", str(home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.delenv("LOOPX_CODEX_HOMES", raising=False)
+    if selection == "configured":
+        monkeypatch.setenv("CODEX_HOME", str(alias))
+    elif selection == "explicit":
+        monkeypatch.setenv("LOOPX_CODEX_HOMES", os.pathsep.join(map(str, [alias, home])))
+    profile = "codex-alias" if selection == "sibling" else "codex"
+    root = tmp_path / "runtime"
+    assert configure(root, codex_profile=profile)["status"] == "applied"
+    stored = read_machine_configuration(root, registry=build_builtin_machine_configuration_registry())
+    defaults = stored["namespaces"]["codex_chat"]
+    assert defaults["codex_profile"] == profile
+    calls = []
+
+    def start(**kwargs):
+        calls.append(kwargs)
+        return CodexAppServerAdapter(SimpleNamespace(
+            model="fixture-model", resolved_model="fixture-model", resolved_reasoning_effort=None,
+            service_tier=None, read_only_review=False, thread_id="fixture-native-thread",
+            process=SimpleNamespace(poll=lambda: None), close=lambda: None,
+        ))
+
+    monkeypatch.setattr(CodexAppServerAdapter, "start", start)
+    # An existing executable satisfies the real readiness probe without running it.
+    runtime = ChatRuntimeController(store=ChatSessionStore(root), codex_bin=sys.executable)
+    try:
+        session, reused = runtime.open_session(
+            goal_id="fixture", agent_id="codex", work_dir=tmp_path, objective="Inspect.", mode="new",
+        )
+        assert not reused
+        assert codex_profile_options() == ["codex", "codex-alias"]
+        editor = capability_configuration_editor("codex_chat")
+        assert next(field for field in editor["fields"] if field["key"] == "codex_profile")["options"] == [
+            "codex", "codex-alias",
+        ]
+        assert codex_profile_home(home, defaults) == home.resolve()
+        assert session["codex_home"] == str(home.resolve())
+        assert session["codex_chat_configuration"]["codex_profile"] == profile
+        assert session["upstream_thread_id"] == "fixture-native-thread"
+        assert len(calls) == 1 and calls[0]["codex_home"] == home.resolve()
+        assert runtime.store.load_session(session["session_id"])["codex_home"] == str(home.resolve())
+        assert (home / "config.toml").read_text(encoding="utf-8") == native_config
+        assert read_machine_configuration(root, registry=build_builtin_machine_configuration_registry()) == stored
+    finally:
+        runtime.close()
 
 
 def runtime_fixture(tmp_path, monkeypatch):
@@ -38,6 +118,7 @@ def runtime_fixture(tmp_path, monkeypatch):
         return CodexAppServerAdapter(SimpleNamespace(model=settings.get("model") or "inherited-model",
             resolved_model=settings.get("model") or "inherited-model",
             resolved_reasoning_effort=settings.get("reasoning_effort"), service_tier=settings.get("service_tier"),
+            read_only_review=False,
             thread_id=f"native-{len(calls)}", process=SimpleNamespace(poll=lambda: None), close=lambda: None))
 
     monkeypatch.setattr(runtime, "_start_adapter", start)

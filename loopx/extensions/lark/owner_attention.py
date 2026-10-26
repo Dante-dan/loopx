@@ -91,7 +91,8 @@ class LarkOwnerAttention:
             raise ValueError("notifications require an authorized owner private steward")
         return row
 
-    def _route(self, binding: dict[str, Any], saved: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _route(self, binding: dict[str, Any], saved: dict[str, Any] | None = None, *,
+               session_id: str | None = None, source_ref: str | None = None) -> dict[str, Any]:
         candidates = [saved] if saved is not None else [
             _read_json(path) for path in sorted(self.transport.root.glob("*.json"), reverse=True)
             if re.fullmatch(r"[a-f0-9]{24}", path.stem)]
@@ -110,6 +111,12 @@ class LarkOwnerAttention:
             if (native.get("binding_id") != binding["binding_id"] or native.get("source") != record.get("source")
                     or native.get("origin", "lark") != "lark"
                     or native.get("status") in {"prepared", "rejected"}):
+                continue
+            # A report belongs to one prepared actor, even when this private
+            # chat has older Sessions. Core owns the Session correlation; a
+            # transport receipt's filename or copied session_id cannot select it.
+            if ((session_id is not None and native.get("session_id") != session_id)
+                    or (source_ref is not None and (native.get("source") or {}).get("source_ref") != source_ref)):
                 continue
             selected = self.transport.bindings.resolve(binding_id=binding["binding_id"],
                 **record["source"], include_observation=True)

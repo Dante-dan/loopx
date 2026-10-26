@@ -95,12 +95,15 @@ export const researchDisplayLanguageScenario = {
         const context = page.context();
         // Model an appended analysis version becoming visible in the same
         // real owner's catalog after this page has already read its snapshot.
-        let newVersionVisible = false;
+        let newVersionVisible = false, rejectedSubmission = false;
         await page.route(url => url.pathname === "/api/chat/research-analysis", async route => {
           if (route.request().method() !== "GET") return route.continue();
           const response = await route.fetch();
           const value = await response.json();
           if (!newVersionVisible) value.catalog.packs = value.catalog.packs.filter(pack => pack.title !== "部分译文");
+          // Fault-inject advertised analysis availability for the refusal
+          // case only. The real fixture HTTP owner still rejects every POST.
+          if (rejectedSubmission) value.execution_enabled = true;
           await route.fulfill({response, json: value});
         });
         const url = `${owner.base}/chat/?goalId=${owner.goal_id}&view=research&statusUrl=%2Fstatus.json`;
@@ -156,7 +159,9 @@ export const researchDisplayLanguageScenario = {
         const entry = history.locator(".research-route-caption button").first();
         const returnKey = await entry.getAttribute("data-research-return");
         await entry.focus(); await page.keyboard.press("Enter"); await reader.waitFor();
-        assert.match(await reader.locator("h3").first().innerText(), /V18 是否在固定预算/);
+        const question = reader.locator(".research-reader-question");
+        assert(await question.evaluate(element => element.open), "The route's complete question opens with its finding");
+        assert.match(await question.innerText(), /V18 是否在固定预算/);
         assert.match(await reader.innerText(), /实测变化为 -0.25ms/);
         assert.match(await reader.innerText(), /第4次尝试有2项检查未通过（Trial4failed2checks）；仅限本地（local-only）的证据仍属初步/);
         assert.match(await reader.innerText(), /已反驳/);
@@ -178,7 +183,7 @@ export const researchDisplayLanguageScenario = {
         await page.locator(".personal-channel-scroll").evaluate(element => element.scrollTop = 0);
         await page.screenshot({path: resolve(outputDir, `research-display-language-reader-${width}.png`), animations: "disabled"});
         await original.click();
-        assert.equal(await reader.locator("h3").first().innerText(), capture.events[0].title);
+        assert.equal(await question.locator(":scope > summary").innerText(), capture.events[0].title);
         await page.screenshot({path: resolve(outputDir, `research-display-language-original-reader-${width}.png`), animations: "disabled"});
         await history.getByRole("button", {name: "查看译文", exact: true}).click();
         await reader.focus(); await page.keyboard.press("Escape");
@@ -251,6 +256,8 @@ export const researchDisplayLanguageScenario = {
         if (width === 1440) {
           const before = await fetch(`${owner.base}/fixture/readback`).then(response => response.json());
           assert.equal(before.mutation_attempts, 0, "Reading, language and original toggles never execute");
+          rejectedSubmission = true;
+          await history.getByRole("button", {name: "刷新记录", exact: true}).click();
           await history.locator(".research-analysis-entry-actions > button").click();
           await history.getByRole("button", {name: "重新分析并补全译文", exact: true}).click();
           await history.getByRole("alert").filter({hasText: "分析请求未完成，已保存结果保留。"}).waitFor();

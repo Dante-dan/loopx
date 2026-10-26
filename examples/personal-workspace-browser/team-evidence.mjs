@@ -72,7 +72,21 @@ export const teamEvidenceScenario = {
       await page.getByRole("region", {name: "团队成果", exact: true}).getByRole("table").waitFor();
       await goalNav.getByRole("button", {name: "对话", exact: true}).click();
       await results.getByRole("table").waitFor();
-      await results.getByText(/已检查的工作中有无法核验的记录/).waitFor();
+      const coverageHelp = results.getByRole("button", {name: "团队记录未完全核验", exact: true});
+      const reportBeforeHelp = await results.getByLabel("证据内容: report.md").textContent();
+      const turnsBeforeHelp = api.turnRequests.length;
+      await coverageHelp.click();
+      const coverageTooltip = coverageHelp.locator("..").getByRole("tooltip");
+      await coverageTooltip.waitFor({state: "visible"});
+      assert.equal(await coverageTooltip.getByRole("status").innerText(),
+        "已检查的工作中有无法核验的记录；当前报告只代表它自己的验收，不代表整个团队。",
+        "Partial team coverage must not turn one accepted report into whole-team acceptance");
+      await page.keyboard.press("Escape");
+      await coverageTooltip.waitFor({state: "hidden"});
+      assert(await coverageHelp.evaluate(el => el === document.activeElement), "Closing coverage help returns to its trigger");
+      assert.equal(await results.getByLabel("证据内容: report.md").textContent(), reportBeforeHelp,
+        "Reading coverage help preserves the selected accepted report");
+      assert.equal(api.turnRequests.length, turnsBeforeHelp, "Reading coverage help never starts a model turn");
       assert.match(await results.getByLabel("证据内容: report.md").textContent(), /Free cash/);
       await page.unroute("**/api/chat/sessions/*/loopx", laterAcceptedPage);
       const repeatedCursor = async route => {

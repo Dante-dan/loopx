@@ -48,6 +48,24 @@ TypeScript selector. Enrol accounts through the native owner's official login.
 Click **Switch automatically when quota runs out** to authorize the listed slots
 as destinations. Installation alone grants no account effect. The App observer
 runs with its serving LoopX process and rehydrates the saved opt-in on restart.
+Version 0.12.8 uses the registry's declared runtime owner for this policy even when Chat
+history uses a separate `--runtime-root`. The settings page and the native CLI
+therefore read and update the same policy; no history or credential data is
+copied. A registry without `common_runtime_root` retains the explicit Chat
+runtime for its policy, so an isolated setup cannot fall back to the user's
+global policy. Explicit separate registry/runtime owners remain isolated. For a CLI
+watch, pass that registry owner's runtime to `--runtime-root` as usual.
+
+An App observer and CLI `watch` sharing that policy elect one active observer
+with a private process lock. Contenders perform no native account observations
+or switches; they wait up to five seconds between ownership checks and can take
+over when the active owner exits. Stopping a contender releases its thread
+without stopping the active owner. The existing transaction lock still serializes
+configuration, explicit checks and switches. Turning the policy off affects the
+actual observer, while an already dispatched credential transaction retains its
+normal completion/recovery contract. Upgrade and restart all existing observers
+before relying on this ownership fence; an older process does not acquire it.
+
 Client restart is a separate permission, off by default and absent from older
 policies. Enabling it also permits a subsequent explicit manual switch to quit
 and reopen the GPT instance. Neither permission is enabled by installation.
@@ -59,21 +77,69 @@ must still match. The launch probe must explicitly contain `launch_time`: a
 positive finite timestamp retains the launch-date fence; explicit `null` from
 Launch Services uses the inspected PID and executable instead. Missing fields,
 invalid types and non-finite timestamps cannot authorize force quit. A successful
-normal quit never escalates. Other CLI/file owners remain holds. Force quit can interrupt
+normal quit never escalates. Unmanaged CLI/file owners remain holds. Force quit can interrupt
 work in that instance; it does not authorize replay of submitted jobs.
 Version 0.12.4 also records the inspected App's descendants before quitting.
 Only those helpers, with unchanged kernel executable and microsecond start
 identity, can be retired after the App exits. An older orphan with no observed
 parentage, a standalone CLI using the same bundled binary, or a later App launch
 remains a hold. Bundle paths alone never authorize termination.
-With client restart enabled, the known LoopX Chat launch agent can also be
-paused when its observed process tree actually holds this home. Its restoration
-intent is saved privately before unloading, and restoration is checked even
-after a partial failure. A failed restore is reported as `chat_resume_failed`;
+With client restart enabled, version 0.12.6 discovers all loaded current-user
+LaunchAgents whose observed Codex process trees consume this home. Service names are
+not an allowlist: renamed Chat services, additional providers and plists with
+different filenames participate through their existing launchd manager. A
+trusted plist, its loaded path, PID, executable and kernel start identity must
+match. An unrelated home, ambiguous definition or unverifiable owner cannot
+authorize a restart. Discovery combines open home files with the private launch
+environment of Codex processes, covering warm app-servers that cached auth and
+closed their files. Arguments and environment values are never projected or logged.
+
+Each service's restoration intent is saved privately before unloading. Version
+0.12.7 waits up to five seconds for launchd to finish an acknowledged asynchronous
+unload; a job that remains loaded retains its recovery intent and fails without
+switching accounts. Observed
+descendants are retired only while their kernel identity still matches, even if
+they have since closed every auth file. The provider waits for their exit and
+rechecks native idle under the existing account transaction locks. Up to three
+rescans cover services that appear during shutdown. With force permission,
+helpers still alive after normal termination can be killed against those same
+frozen identities. No arbitrary CLI is relaunched and no submitted job is replayed.
+
+Restoration is checked even after a partial failure. A loaded job alone is not
+success: a previously running service must have a fresh live process. A failed
+restore is reported as `chat_resume_failed`;
 the next native request reconciles that intent without repeating the account
 transaction. A changed service definition is preserved and requires local
 repair rather than bootstrapping unchecked bytes. Installation does not enable
 client restart or start a new Chat service.
+
+`loopx-codex-accounts clients` performs a read-only live inventory with PIDs,
+App/service/unmanaged classification and restartability. This inventory also
+leaves outstanding service recovery to the existing status/switch owner. It never reads token
+contents or changes selection. Unknown file owners (including filesystem/VM
+services without a proven restart owner) remain visible holds; installation
+does not turn them into termination targets. Discovery is best effort within
+the current user's kernel visibility, not a claim to inspect auth cached inside
+another user's process or a virtual machine.
+
+Version 0.12.9 also explains unmanaged holders through Darwin's optional kernel
+responsibility probe. Reparented XPC processes can retain a different manager
+from the current App. A responsible PID/name is diagnostic provenance, never
+App ownership or restart permission. For a verified installed Lima hostagent,
+the inventory cross-checks its private pidfile and the original Lima/Colima
+catalog's running instance; raw arguments, environment and catalog paths stay
+private. Missing SPI/permissions, changed launch identities, ambiguous instances
+or unavailable manager reads preserve an explicit hold. No guest command runs.
+The existing App/LaunchAgent restart path is unchanged; externally managed
+workloads require their own idle/recovery qualification. This read-only CLI
+diagnostic is a staged prerequisite: the settings page still shows its existing
+busy cause, and VM recovery/new-auth adoption remain unqualified.
+
+0.12.9 的只读占用清单会核对脱离 App 进程树的 XPC 责任进程，并对已核验的
+Lima/Colima 管理器交叉读取原实例。识别到管理器不等于业务空闲或可以重启；
+未知或变化的身份保留等待，不执行 guest 命令，不新增强关目标。设置页的完整
+占用诊断与外部工作负载恢复仍待交付，不能把这一步视为真实换号已生效。
+
 An operator-owned service independent of the App can run the same observer:
 
 ```sh
@@ -261,3 +327,33 @@ exercised, followed by a fresh successful check without changing the account.
 ![Desktop force-quit settings / 桌面强关设置](docs/assets/native-accounts-force-desktop.png)
 
 ![Narrow settings / 窄屏设置](docs/assets/native-accounts-force-narrow.png)
+
+### Shared policy owner / 共用策略来源
+
+The settings page and CLI use the registry-declared native account owner even
+when Chat history has a separate runtime directory. Without a declared owner,
+an explicit isolated Chat runtime remains isolated. Version 0.12.8 also holds a
+process lock for the observer lifetime: another App or CLI stays passive until
+the owner exits. Upgrade and restart every existing observer before relying on
+this guarantee; an older observer does not participate in the new lock.
+
+设置页与 CLI 共用 registry 声明的原生账号策略来源，会话历史仍保留在原目录。
+未声明公共来源时，显式隔离的 Chat runtime 保持隔离。0.12.8 通过跨进程锁保证同一
+策略来源只有一个自动观察器；原观察器退出后，等待者接管。升级时需要重启所有旧
+观察器，旧版本不会自动遵守新锁。
+
+The actual packaged page and HTTP service below use synthetic A/B/C accounts.
+Turning automatic switching off and back on persisted to the shared owner and
+survived reload without changing the separate conversation policy. Unknown
+allowance kept account A selected; a fresh successful check recovered. These
+images do not qualify a real credential switch.
+
+以下为实际打包网页与 HTTP 服务，账号 A/B/C 为合成数据。关闭、重新开启和刷新后
+均读回共用策略，会话目录中的独立旧策略未被改写。额度未知时保留 A，重新检查后
+恢复；不代表已完成真实账号切换。
+
+![Shared account policy, desktop / 桌面](docs/assets/native-policy-owner-desktop.png)
+
+![Shared account policy, narrow / 窄屏](docs/assets/native-policy-owner-narrow.png)
+
+![Unknown allowance preserves selection / 额度未知保留当前账号](docs/assets/native-policy-owner-unknown-narrow.png)

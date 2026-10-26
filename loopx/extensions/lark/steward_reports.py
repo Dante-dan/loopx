@@ -16,7 +16,7 @@ from ...file_lock import try_exclusive_file_lock
 from ...file_lock import exclusive_file_lock
 from ...registry import atomic_write_json
 from ...capabilities.native_chat.steward_reports import StewardReports
-from ...capabilities.native_chat.steward_turn import native_steward_client_id
+from ...capabilities.native_chat.steward_turn import report_turn
 from ...capabilities.periodic_report.cadence_journal import read_cadence_journal
 from ...capabilities.periodic_report.private_generation import attempt_directory, validate_private_generation
 from ...capabilities.periodic_report.incremental import commit_periodic_report_publication_cursor
@@ -28,8 +28,10 @@ class LarkStewardReports:
         self.controller = transport.core.controller
         self.reports = StewardReports(self.controller)
 
-    def _original_route(self, binding: dict[str, Any], actor: dict[str, Any]) -> dict[str, Any]:
-        route = self.transport.owner_attention._route(binding)
+    def _original_route(self, binding: dict[str, Any], actor: dict[str, Any],
+                        saved: dict[str, Any] | None = None) -> dict[str, Any]:
+        route = self.transport.owner_attention._route(binding, saved,
+            session_id=actor["session_id"], source_ref=actor["source_ref"])
         native = self.transport.core.read_request(route["request_ref"])
         if native.get("session_id") != actor["session_id"] or route["source"]["source_ref"] != actor["source_ref"]:
             raise ValueError("the private source does not belong to the original reporting steward")
@@ -48,8 +50,7 @@ class LarkStewardReports:
     def _committed_turn(self, actor: dict[str, Any], window: dict[str, Any]) -> dict[str, Any] | None:
         # Same stable client identity as the original native host. Reading a
         # retained completion/event never replays an unknown or failed Turn.
-        client = native_steward_client_id(actor, "report." + window["window_id"])
-        turn = self.controller.store.turn_for_client(actor["session_id"], client)
+        turn = report_turn(self.controller.store, actor, window)
         if not turn:
             return None
         request = turn.get("loopx_request") or {}
@@ -100,7 +101,7 @@ class LarkStewardReports:
                         record = _read_json(path)
                         if record.get("publication_cursor"):
                             continue
-                        route = self.transport.owner_attention._route(binding, record["original_route"])
+                        route = self._original_route(binding, actor, record["original_route"])
                     else:
                         route = self._original_route(binding, actor)
                         original = _read_json(self.transport.root / (route["request_ref"] + ".json"))

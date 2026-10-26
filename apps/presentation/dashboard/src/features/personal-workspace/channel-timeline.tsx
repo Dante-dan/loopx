@@ -30,6 +30,7 @@ function answerLink(sessionId: string, messageId: string) {
 
 export function ChannelTimeline({
   emptyState,
+  readOnly = false,
   items,
   onSelect,
   selectedGoal,
@@ -42,6 +43,7 @@ export function ChannelTimeline({
   onCancelPreparation,
 }: {
   emptyState?: { title: string; description: string };
+  readOnly?: boolean;
   items: WorkspaceTimelineItem[];
   onCancelPreparation?: () => void;
   onSelect: (selection: WorkspaceDrawerSelection) => void;
@@ -58,8 +60,8 @@ export function ChannelTimeline({
     return (
       <div className="personal-timeline-empty">
         <span><Sparkles size={20} /></span>
-        <strong>{emptyState?.title ?? (selectedGoal ? t("timeline.emptyGoal") : t("timeline.emptyWorkspace"))}</strong>
-        <p>{emptyState?.description ?? (selectedGoal ? t("timeline.emptyGoalDescription") : t("timeline.emptyWorkspaceDescription"))}</p>
+        <strong>{emptyState?.title ?? (readOnly ? t("timeline.emptyReadOnly") : selectedGoal ? t("timeline.emptyGoal") : t("timeline.emptyWorkspace"))}</strong>
+        {!readOnly ? <p>{emptyState?.description ?? (selectedGoal ? t("timeline.emptyGoalDescription") : t("timeline.emptyWorkspaceDescription"))}</p> : null}
       </div>
     );
   }

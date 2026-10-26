@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { openWorkspacePage } from "./scenario-context.mjs";
 
-// Compiled UI with synthetic HTTP Session storage; ACP adoption has its own stdio smoke.
+// Compiled UI with synthetic HTTP Session storage; native adoption is separately
+// checked against the production HTTP/store and fake app-server protocol.
 export const agentModelSelectionScenario = {
   id: "agent-model-selection",
   async run({ browser, collectCoverage, url }) {
     let createdCount = 0;
     const requests = [];
+    const settingsRequests = [];
+    let failSave = false;
     let discoveryCount = 0;
     const managerBinding = {
       schema_version: "manager_channel_binding_v0", executor_endpoint: "codex",
@@ -38,6 +41,7 @@ export const agentModelSelectionScenario = {
           const session = existing ?? {
             session_id: `model-session-${++createdCount}`, goal_id: body.goal_id || "loopx-manager", agent_id: body.agent_id ?? "codex",
             agent_model_id: body.agent_model_id ?? "runtime-default", agent_reasoning_effort: body.agent_reasoning_effort ?? "high", agent_service_tier: "priority", adapter_kind: "codex_app_server", channel_id: channel,
+            requested_agent_model_id: body.agent_model_id ?? null, requested_agent_reasoning_effort: body.agent_reasoning_effort ?? null, model_settings_supported: channel !== "manager",
             status: "ready", active_turn_id: null, last_error_code: null, resumable: true,
             created_at: "2026-08-13T01:00:00Z", updated_at: "2026-08-13T01:00:00Z",
           };
@@ -46,6 +50,28 @@ export const agentModelSelectionScenario = {
           await route.fulfill({ status: existing ? 200 : 201, json: {
             ok: true, session_id: session.session_id, session, resumed: Boolean(existing), agent_id: session.agent_id,
           } });
+        });
+        await page.route("**/api/chat/sessions/*/model-settings", async route => {
+          const body = route.request().postDataJSON();
+          const sid = new URL(route.request().url()).pathname.split("/")[4];
+          settingsRequests.push({sessionId: sid, ...body});
+          if (failSave) return route.fulfill({status: 503, json: {ok: false, error: "Settings storage unavailable"}});
+          const previous = page.__loopxRuntime.sessions.get(sid);
+          const session = {...previous, requested_agent_model_id: body.agent_model_id,
+            requested_agent_reasoning_effort: body.agent_reasoning_effort ?? previous.requested_agent_reasoning_effort ?? previous.agent_reasoning_effort,
+            updated_at: "2026-08-13T01:00:02Z"};
+          page.__loopxRuntime.sessions.set(sid, session);
+          return route.fulfill({json: {ok: true, session}});
+        });
+        await page.route("**/api/chat/sessions/*/turns", async route => {
+          if (route.request().method() === "POST") {
+            const sid = new URL(route.request().url()).pathname.split("/")[4];
+            const session = page.__loopxRuntime.sessions.get(sid);
+            if (session) page.__loopxRuntime.sessions.set(sid, {...session,
+              agent_model_id: session.requested_agent_model_id ?? session.agent_model_id,
+              agent_reasoning_effort: session.requested_agent_reasoning_effort ?? session.agent_reasoning_effort});
+          }
+          return route.fallback();
         });
       },
     });
@@ -155,7 +181,7 @@ export const agentModelSelectionScenario = {
       await page.getByRole("combobox", { name: "选择思考深度" }).click();
       await page.getByRole("option", { name: "low", exact: true }).click();
       const original = await send("解释模型选择如何保持当前对话。");
-      assert.equal(requests.at(-1).agent_reasoning_effort, "low", "An explicit effort is included in the native Session request");
+      assert.equal(settingsRequests.at(-1).agent_reasoning_effort, "low", "An explicit effort is saved to the existing Session");
       assert.match(await menu.locator("summary small").innerText(), /low/, "Current effort comes from Session readback");
       await menu.locator(".personal-model-current").filter({ hasText: "safe" }).waitFor();
       const before = createdCount;
@@ -166,11 +192,11 @@ export const agentModelSelectionScenario = {
       await page.getByRole("combobox", { name: "选择思考深度" }).click();
       await page.getByRole("option", { name: "high", exact: true }).click();
       const changed = await send("使用新模型继续分析。");
-      assert.notEqual(changed, original);
-      assert.equal(createdCount, before + 1, "a real model change creates exactly one distinct Session");
+      assert.equal(changed, original);
+      assert.equal(createdCount, before, "A model change retains exactly the same Session");
       assert.equal(page.__loopxRuntime.sessions.get(changed).agent_model_id, "vendor/model  fast");
       assert.ok(page.__loopxRuntime.sessions.has(original), "prior history remains addressable");
-      assert.equal(requests.at(-1).agent_model_id, "vendor/model  fast", "an explicit choice uses the exact model identifier");
+      assert.equal(settingsRequests.at(-1).agent_model_id, "vendor/model  fast", "an explicit choice uses the exact model identifier");
       await page.setViewportSize({width: 390, height: 844});
       await openSettings();
       const inputBounds = await page.locator(".personal-channel-composer").boundingBox();
@@ -185,7 +211,25 @@ export const agentModelSelectionScenario = {
       assert.match(await readback.innerText(), /high · Fast/);
       assert.ok((await readback.boundingBox()).height < 30, "speed and reasoning do not wrap into a vertical column");
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
-      return { coverageEntries: context.coverageEntries, note: "Same-model selection preserves Session identity; a changed exact model value creates one distinct Session through the compiled UI and synthetic HTTP store." };
+      await page.keyboard.press("Escape");
+      await draft.fill("保存失败也不能丢掉草稿。");
+      await openSettings();
+      failSave = true;
+      await page.getByRole("combobox", {name: "选择思考深度"}).click();
+      await page.getByRole("option", {name: "low", exact: true}).click();
+      await page.getByRole("button", {name: "重试保存", exact: true}).waitFor();
+      assert.equal(await draft.inputValue(), "保存失败也不能丢掉草稿。");
+      assert.equal(page.__loopxRuntime.sessions.get(original).requested_agent_reasoning_effort, "high");
+      failSave = false;
+      const retried = page.waitForResponse(response => response.url().endsWith("/model-settings") && response.status() === 200);
+      await page.getByRole("button", {name: "重试保存", exact: true}).click();
+      await retried;
+      assert.equal(page.__loopxRuntime.sessions.get(original).requested_agent_reasoning_effort, "low");
+      assert.equal(createdCount, before);
+      await page.reload({waitUntil: "networkidle"});
+      await menu.locator("summary small").filter({hasText: "low"}).waitFor();
+      assert.equal(createdCount, before, "Reopening retains the same Session and its saved subsequent choice");
+      return { coverageEntries: context.coverageEntries, note: "Current-Session model/depth changes, failure retry and refresh preserve identity and draft through the compiled UI and synthetic HTTP store; native protocol adoption is qualified separately." };
     } finally {
       await context.close();
     }
