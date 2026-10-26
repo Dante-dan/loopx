@@ -851,6 +851,11 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check -e ".[test]"
 
+      - name: Qualify source-scoped research storage and native process paths
+        run: >-
+          python -m pytest -q
+          tests/capabilities/test_trajectory_assessment_store.py::test_source_scoped_manifest_and_process_preserve_full_identity
+
       - name: Verify native Windows test Python discovery
         run: node --no-warnings --experimental-strip-types --test tests/control_plane_ts/test_python_runtime.test.ts
 
@@ -940,11 +945,6 @@ jobs:
           tests/test_peer_collaboration.py::test_peer_exchange_survives_long_private_store_paths
           tests/test_peer_collaboration.py::test_peer_binary_artifact_preserves_crlf_and_ctrl_z_digest
           tests/test_peer_collaboration.py::test_peer_read_qualifies_long_workspace_input
-
-      - name: Qualify source-scoped research storage and native process paths
-        run: >-
-          python -m pytest -q
-          tests/capabilities/test_trajectory_assessment_store.py::test_source_scoped_manifest_and_process_preserve_full_identity
 
       - name: Validate local-state routing and interruption recovery on Windows
         run: >-
