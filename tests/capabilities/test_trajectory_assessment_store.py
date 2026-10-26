@@ -142,8 +142,21 @@ def test_source_scoped_manifest_and_process_preserve_full_identity(pack, tmp_pat
                 control.setattr(adapter, "_provider_cwd", lambda directory: nullcontext(directory))
                 with pytest.raises(OSError):
                     execute_pack(**operation, codex=str(provider))
-        assert execute_pack(**operation, codex=str(provider), retry=os.name == "nt")["status"] == "succeeded"
+        cancelling_provider = write_python_host_fixture(tmp_path / "cancel-provider", """
+import sys,time
+from pathlib import Path
+output = Path(sys.argv[sys.argv.index('-o')+1])
+output.with_name('provider-cwd.txt').write_text(str(Path.cwd()), encoding='utf-8')
+output.with_name('cancel.request').touch()
+time.sleep(60)
+""")
+        assert execute_pack(**operation, codex=str(cancelling_provider), retry=os.name == "nt")["status"] == "cancelled"
         directory = owner / "jobs" / registered["analysis_key"]
+        assert not (directory / "execution.lock").exists()
+        cancelled_cwd = Path((directory / "provider-cwd.txt").read_text(encoding="utf-8"))
+        if os.name == "nt":
+            assert len(str(cancelled_cwd)) < 260 and not cancelled_cwd.exists()
+        assert execute_pack(**operation, codex=str(provider), retry=True)["status"] == "succeeded"
         cwd = Path((directory / "provider-cwd.txt").read_text(encoding="utf-8"))
         if os.name == "nt":
             assert len(str(cwd)) < 260 and not cwd.exists()
