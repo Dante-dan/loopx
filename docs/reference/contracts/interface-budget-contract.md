@@ -467,6 +467,15 @@ quota 小型／拥挤夹具为 9,558／10,225 字符、182／166 行，比同一
 
 ### Native fixture qualification
 
+The real long-path brief fixture fixes the root at 128 JSON string-content
+characters, including escaped native separators. It pads the owned directory
+name after accounting for its existing parent, ascending only when necessary.
+This holds the measured workload constant across temporary-namespace depths;
+CLI output and full command routes are measured unchanged against the existing
+mode ceilings. The physical root can be shorter on Windows because each
+backslash costs two JSON characters. Native Windows qualification remains
+separate from pure path-cost regression checks on other hosts.
+
 The opt-in captured TurnEnvelope heartbeat has a separate 400-character body
 allowance above ordinary thin: 4,600 without Reward Memory. It retains complete
 runtime/capture routes, same-invocation recovery, inline ACK conditions and the

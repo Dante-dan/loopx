@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 import shutil
 import tempfile
 
@@ -28,3 +29,14 @@ def stable_budget_fixture_root(root: Path):
         yield fixture
     finally:
         shutil.rmtree(fixture)
+
+
+def long_path_budget_prefix(parent: PurePath) -> str:
+    """Pad an owned root to 128 JSON string-content characters, not host path characters."""
+    prefix = "loopx-brief-"
+    # tempfile adds eight ASCII characters. Count JSON escaping of native
+    # separators too: a deeper Windows namespace must not enlarge the workload.
+    padding = 128 - (len(json.dumps(str(parent / prefix), ensure_ascii=False)) - 2) - 8
+    if padding < 0:
+        raise ValueError("temporary parent exceeds the serialized path workload")
+    return prefix + "p" * padding

@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -33,6 +33,7 @@ from loopx.help_surface import COMMAND_GROUPS
 from loopx.rollout_event_log import rollout_event_log_path
 from tests.control_plane.cli_output_fixture import (
     budget_fixture_path,
+    long_path_budget_prefix,
     stable_budget_fixture_root as _stable_budget_fixture_root,
 )
 
@@ -1718,26 +1719,39 @@ def test_thin_json_budget_retains_full_supported_scope(tmp_path: Path) -> None:
         assert "Local outcomes never replace root continuation, budget or stop criteria." in payload["task_body"]
 
 
+@pytest.mark.parametrize("parent", [
+    PureWindowsPath("D:/Temp"),
+    PureWindowsPath("C:/Users/runner/AppData/Local/Temp/pytest-of-runner/pytest-1/test_budget"),
+    PureWindowsPath("//server/share/temp/a/b/c"),
+])
+def test_long_path_budget_holds_json_cost_across_native_separator_depth(parent: PureWindowsPath) -> None:
+    prefix = long_path_budget_prefix(parent)
+    root = parent / f"{prefix}abcdefgh"
+    # Independent observable contract: JSON serialization sees the same root
+    # cost for a drive, a deep runner namespace and a UNC namespace.
+    assert len(json.dumps(str(root), ensure_ascii=False)) - 2 == 128
+    assert len(str(root)) < 128
+
+
 def test_brief_budget_retains_full_commands_on_real_long_paths() -> None:
-    # A reproducible 128-character absolute root; directory depth can still
-    # change JSON escaping cost. Keep full routes and this workload;
-    # presentation-budget changes require matched base/head cost evidence.
-    # Use an existing native temp namespace on Windows; a drive-root /tmp
-    # need not exist. POSIX keeps the short namespace used by socket fixtures.
+    # Pin the serialized root workload, including JSON-escaped separators.
+    # Keep full real routes and the existing output ceilings; presentation
+    # changes still require matched base/head cost evidence.
     parent = Path(tempfile.gettempdir() if os.name == "nt" else "/tmp").resolve()
-    prefix = "loopx-brief-"
     # A nested runner temp can exceed the workload itself. Use its nearest
     # existing ancestor that leaves room for our owned, random child.
-    while len(str(parent / prefix)) + 8 > 128:
-        assert parent != parent.parent, "No temporary ancestor fits the 128-character workload"
-        parent = parent.parent
-    # tempfile contributes an eight-character random suffix. Hold input size
-    # constant even when the selected parent is a drive or share root.
-    prefix += "p" * (128 - len(str(parent / prefix)) - 8)
+    while True:
+        try:
+            prefix = long_path_budget_prefix(parent)
+            break
+        except ValueError:
+            assert parent != parent.parent, "No temporary ancestor fits the serialized path workload"
+            parent = parent.parent
     with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as directory:
         root = Path(directory).resolve()
-        assert len(str(root)) == 128
+        assert len(json.dumps(str(root), ensure_ascii=False)) - 2 == 128
         _assert_mode_variant_budgets(root, only="heartbeat_prompt_brief")
+
 
 
 def test_brief_long_path_budget_retains_semantics_across_parent_depths(
@@ -1757,7 +1771,7 @@ def test_brief_long_path_budget_retains_semantics_across_parent_depths(
 
     def capture_root(root: Path, *, only: str | None = None) -> None:
         roots.append(root)
-        assert len(str(root)) == 128
+        assert len(json.dumps(str(root), ensure_ascii=False)) - 2 == 128
         assert_budgets(root, only=only)
 
     def capture_output(command):
