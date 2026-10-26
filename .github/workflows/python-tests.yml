@@ -940,6 +940,11 @@ jobs:
           tests/test_peer_collaboration.py::test_peer_binary_artifact_preserves_crlf_and_ctrl_z_digest
           tests/test_peer_collaboration.py::test_peer_read_qualifies_long_workspace_input
 
+      - name: Qualify source-scoped research storage and native process paths
+        run: >-
+          python -m pytest -q
+          tests/capabilities/test_trajectory_assessment_store.py::test_source_scoped_manifest_and_process_preserve_full_identity
+
       - name: Validate local-state routing and interruption recovery on Windows
         run: >-
           python -m pytest -q

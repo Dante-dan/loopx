@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 
 from ...control_plane.content_digest import BARE_SHA256_PATTERN
 from ...control_plane.effect_runtime import EffectRuntimeRejected, effect_runtime_result
+from ...control_plane.runtime.file_paths import windows_extended_path
 from ...file_lock import exclusive_file_lock
 from .trajectory_assessment import _digest, _write, execute, read_job, request_cancel
 
@@ -37,7 +38,7 @@ def _opaque(value: str) -> str:
 def _owner(runtime_root: Path, owner_goal_id: str) -> Path:
     if not isinstance(owner_goal_id, str) or not owner_goal_id.strip():
         raise PackUnavailable("missing_goal_scope")
-    return (
+    return windows_extended_path(
         runtime_root.resolve()
         / "benchmark"
         / "trajectory-assessments"

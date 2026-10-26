@@ -5,12 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import nullcontext
+from pathlib import Path
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from loopx.control_plane.effect_runtime import EffectRuntimeRejected
+from loopx.control_plane.runtime.file_paths import windows_extended_path
+from loopx.control_plane.status.goal_source import GoalSource
+from loopx.presentation.runtime_workspace import RuntimeWorkspaceServer
+from tests.control_plane.host_process_fixture import write_python_host_fixture
 
 from loopx.capabilities.benchmark_toolkit.trajectory_assessment_store import (
     PackUnavailable,
@@ -97,6 +103,7 @@ import json,sys
 from pathlib import Path
 assert "\\u539f\\u59cb\\u76ee\\u6807" in sys.stdin.buffer.read().decode("utf-8")
 Path(sys.argv[sys.argv.index('-o')+1]).write_bytes({json.dumps(output, ensure_ascii=False).encode("utf-8")!r})
+Path(sys.argv[sys.argv.index('-o')+1]).with_name('provider-cwd.txt').write_text(str(Path.cwd()),encoding='utf-8')
 sys.stderr.buffer.write("\\u5408\\u6210\\u8bca\\u65ad".encode("utf-8"))
 sys.stdout.buffer.write((json.dumps({{'type':'turn.completed','message':'\\u5206\\u6790\\u5b8c\\u6210','usage':{{'input_tokens':10,'output_tokens':2}}}},ensure_ascii=False)+'\\n').encode("utf-8"))
 """,
@@ -104,6 +111,50 @@ sys.stdout.buffer.write((json.dumps({{'type':'turn.completed','message':'\\u5206
     )
     executable.chmod(0o700)
     return scope, operation, registered, input_path, sources, str(executable)
+
+
+def test_source_scoped_manifest_and_process_preserve_full_identity(pack, tmp_path, monkeypatch):
+    """Real files/child at the namespaced boundary, including native Windows."""
+    import loopx.capabilities.benchmark_toolkit.trajectory_assessment as adapter
+
+    _, _, _, input_path, sources, script = pack
+    provider = write_python_host_fixture(Path(script), Path(script).read_text(encoding="utf-8"))
+    original = {path: path.read_bytes() for path in (input_path, sources / "result.txt")}
+    source = GoalSource("fixture", "Fixture", str(tmp_path / "registry"), str(tmp_path / "source"),
+                        str(provider), sys.executable, str(tmp_path), "local", "host", "research-owner")
+    # Keep the caller's real source namespace instead of shortening a hash or
+    # bypassing RuntimeWorkspaceServer's storage selection to make the test pass.
+    with RuntimeWorkspaceServer(source, tmp_path, analysis_runtime_root=tmp_path / "analysis") as server:
+        runtime_root = server.analysis_runtime_root
+        assert runtime_root.name == source.namespace and len(source.namespace) == 64
+        scope = dict(runtime_root=runtime_root, owner_goal_id="research-owner")
+        registered = register_pack(**scope, input_path=input_path, source_root=sources, title="Long source")
+        owner = windows_extended_path(runtime_root / "benchmark" / "trajectory-assessments"
+                                      / adapter._digest("research-owner"))
+        manifest = owner / "packs" / (registered["pack_id"] + ".json")
+        assert len(str(manifest)) > 260 and manifest.is_file()
+        assert len(registered["pack_id"]) == 64 and len(owner.name) == 64
+        operation = {**scope, "pack_id": registered["pack_id"], "analysis_key": registered["analysis_key"]}
+        if os.name == "nt":
+            # Deliberately restore the old process boundary after file IO has
+            # succeeded: native CreateProcess must reject that long cwd.
+            with monkeypatch.context() as control:
+                control.setattr(adapter, "_provider_cwd", lambda directory: nullcontext(directory))
+                with pytest.raises(OSError):
+                    execute_pack(**operation, codex=str(provider))
+        assert execute_pack(**operation, codex=str(provider), retry=os.name == "nt")["status"] == "succeeded"
+        directory = owner / "jobs" / registered["analysis_key"]
+        cwd = Path((directory / "provider-cwd.txt").read_text(encoding="utf-8"))
+        if os.name == "nt":
+            assert len(str(cwd)) < 260 and not cwd.exists()
+        else:
+            assert cwd == directory
+        assert execute_pack(**operation, codex="must-not-run")["reused"]
+        assert read_citation(**operation, source_id="source", first_line=2, last_line=2)["text"]
+        for path, before in original.items():
+            assert path.read_bytes() == before
+        with pytest.raises(PackUnavailable):
+            inspect_pack(runtime_root=runtime_root, owner_goal_id="other-owner", pack_id=registered["pack_id"])
 
 
 def test_scope_discovery_execute_read_citation_and_changed_source_history(pack):

@@ -5,15 +5,18 @@ No solver state, score authority, scheduler or Explore writer is used here.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import time
 from typing import Any
 
 from ...control_plane.effect_runtime import effect_runtime_result
+from ...control_plane.runtime.file_paths import windows_extended_path
 from ..native_chat.codex_context import shared_chatgpt_transport
 
 
@@ -38,6 +41,20 @@ def _write(path: Path, value: Any) -> None:
         json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     temporary.replace(path)
+
+
+@contextmanager
+def _provider_cwd(directory: Path):
+    """Keep native Windows process cwd independent of durable storage depth."""
+    if os.name != "nt" or len(str(directory)) < 260:
+        yield directory
+        return
+    # Extended addresses preserve the complete storage namespace for file IO,
+    # but do not remove CreateProcess's current-directory length restriction.
+    # The child receives absolute schema/output addresses and has tools disabled;
+    # this empty owned cwd is neither a new store nor the source's authority.
+    with tempfile.TemporaryDirectory(prefix="lx-analysis-") as temporary:
+        yield Path(temporary)
 
 
 def prepare(
@@ -109,7 +126,7 @@ def execute(
         )
         if not comparison["can_reuse"]:
             raise ValueError("Changed evidence requires full reassessment")
-    directory = output_root.resolve() / prepared["analysis_key"]
+    directory = windows_extended_path(output_root.resolve() / prepared["analysis_key"])
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = directory / "execution.lock"
     try:
@@ -254,13 +271,14 @@ def execute(
             _write(directory / "receipt.json", receipt)
             return receipt
         with (
+            _provider_cwd(directory) as process_directory,
             (directory / "prompt.txt").open(encoding="utf-8") as prompt,
             (directory / "events.jsonl").open("w", encoding="utf-8") as events,
             (directory / "stderr.txt").open("w", encoding="utf-8") as errors,
         ):
             process = subprocess.Popen(
                 command,
-                cwd=directory,
+                cwd=process_directory,
                 stdin=prompt,
                 stdout=events,
                 stderr=errors,
