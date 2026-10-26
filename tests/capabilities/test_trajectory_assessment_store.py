@@ -142,7 +142,7 @@ def test_source_scoped_manifest_and_process_preserve_full_identity(pack, tmp_pat
                 control.setattr(adapter, "_provider_cwd", lambda directory: nullcontext(directory))
                 with pytest.raises(OSError):
                     execute_pack(**operation, codex=str(provider))
-        cancelling_provider = write_python_host_fixture(tmp_path / "cancel-provider", """
+        cancelling_provider = write_python_host_fixture(tmp_path / "cancel-provider", f"#!{sys.executable}\n" + """
 import sys,time
 from pathlib import Path
 output = Path(sys.argv[sys.argv.index('-o')+1])
