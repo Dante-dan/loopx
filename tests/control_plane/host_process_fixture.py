@@ -17,7 +17,11 @@ def write_python_host_fixture(path: Path, source: str) -> Path:
     from distlib.scripts import ScriptMaker
 
     script = path.with_suffix(".py")
-    script.write_text(source, encoding="utf-8")
+    # distlib recognizes a Python script by its shebang, but its matcher does
+    # not accept Windows' python.exe suffix. Otherwise it attempts to copy the
+    # script onto itself instead of building the native launcher.
+    body = source.partition("\n")[2] if source.startswith("#!") else source
+    script.write_text("#!python\n" + body, encoding="utf-8")
     maker = ScriptMaker(str(path.parent), str(path.parent))
     maker.executable = sys.executable
     maker.force = True
